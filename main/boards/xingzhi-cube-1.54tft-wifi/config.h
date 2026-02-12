@@ -41,4 +41,11 @@
 #define SDCARD_SPI_HOST SPI2_HOST
 #define SDCARD_MOUNT_POINT "/sdcard"
 
+// Robot Servo GPIO Config (4 servos)
+#define SERVO_LEFT_FOOT_PIN   GPIO_NUM_45
+#define SERVO_LEFT_LEG_PIN    GPIO_NUM_44
+#define SERVO_RIGHT_FOOT_PIN  GPIO_NUM_11
+#define SERVO_RIGHT_LEG_PIN   GPIO_NUM_12
+#define SERVO_COUNT           4
+
 #endif // _BOARD_CONFIG_H_

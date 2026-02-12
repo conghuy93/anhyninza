@@ -21,6 +21,17 @@
 #include <driver/sdspi_host.h>
 #include "mp3_player.h"
 
+// Robot control
+#include "robot_control.h"
+#include "webserver.h"
+#include "robot_mcp_controller.h"
+#include <esp_event.h>
+#include <esp_wifi.h>
+#include <esp_netif.h>
+
+// Forward declaration for C function in robot_control.c
+extern "C" void set_music_player_ptr(void* mp3_player_ptr);
+
 #define TAG "XINGZHI_CUBE_1_54TFT_WIFI"
 
 class XINGZHI_CUBE_1_54TFT_WIFI : public WifiBoard {
@@ -36,6 +47,8 @@ private:
     Mp3Player* mp3_player_ = nullptr;
     bool music_mode_ = false;
     bool sd_card_mounted_ = false;
+    httpd_handle_t robot_webserver_ = nullptr;
+    bool robot_initialized_ = false;
 
     void InitializePowerManager() {
         power_manager_ = new PowerManager(GPIO_NUM_38);
@@ -49,14 +62,17 @@ private:
     }
 
     void InitializePowerSaveTimer() {
-        rtc_gpio_init(GPIO_NUM_21);
-        rtc_gpio_set_direction(GPIO_NUM_21, RTC_GPIO_MODE_OUTPUT_ONLY);
-        rtc_gpio_set_level(GPIO_NUM_21, 1);
+        // GPIO 21 now used for LED strip - power control disabled
+        // rtc_gpio_init(GPIO_NUM_21);
+        // rtc_gpio_set_direction(GPIO_NUM_21, RTC_GPIO_MODE_OUTPUT_ONLY);
+        // rtc_gpio_set_level(GPIO_NUM_21, 1);
 
         power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
         power_save_timer_->OnEnterSleepMode([this]() {
             GetDisplay()->SetPowerSaveMode(true);
             GetBacklight()->SetBrightness(1);
+            // Turn off LED strip and detach all servos before sleep
+            robot_prepare_sleep();
         });
         power_save_timer_->OnExitSleepMode([this]() {
             GetDisplay()->SetPowerSaveMode(false);
@@ -64,9 +80,8 @@ private:
         });
         power_save_timer_->OnShutdownRequest([this]() {
             ESP_LOGI(TAG, "Shutting down");
-            rtc_gpio_set_level(GPIO_NUM_21, 0);
-            // 启用保持功能，确保睡眠期间电平不变
-            rtc_gpio_hold_en(GPIO_NUM_21);
+            // Ensure LED and servos are off before deep sleep
+            robot_prepare_sleep();
             esp_lcd_panel_disp_on_off(panel_, false); //关闭显示
             esp_deep_sleep_start();
         });
@@ -159,7 +174,7 @@ private:
         });
     }
 
-    void StartMusicMode() {
+    void StartMusicMode(bool from_llm = false) {
         if (music_mode_) return;
         if (!sd_card_mounted_) {
             GetDisplay()->ShowNotification("SD card not found!");
@@ -168,17 +183,23 @@ private:
         }
         music_mode_ = true;
         {
-            // Stop AI chat first to avoid audio conflict
-            auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateListening || 
-                app.GetDeviceState() == kDeviceStateSpeaking) {
-                ESP_LOGI(TAG, "Stopping AI chat before starting music...");
-                app.ToggleChatState();
-                vTaskDelay(pdMS_TO_TICKS(500));
+            // Only stop AI chat if NOT called from LLM tool (to avoid conflict)
+            if (!from_llm) {
+                auto& app = Application::GetInstance();
+                if (app.GetDeviceState() == kDeviceStateListening || 
+                    app.GetDeviceState() == kDeviceStateSpeaking) {
+                    ESP_LOGI(TAG, "Stopping AI chat before starting music...");
+                    app.ToggleChatState();
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                }
             }
             
             if (!mp3_player_) {
                 mp3_player_ = new Mp3Player(GetAudioCodec());
+                
+                // Register with robot control for dance music
+                set_music_player_ptr(mp3_player_);
+                
                 mp3_player_->OnTrackChanged([this](const std::string& track) {
                     size_t pos = track.find_last_of("/");
                     std::string name = (pos != std::string::npos) ? track.substr(pos + 1) : track;
@@ -202,8 +223,11 @@ private:
             int count = mp3_player_->ScanDirectory(SDCARD_MOUNT_POINT);
             if (count > 0) {
                 GetDisplay()->ShowNotification("Music: " + std::to_string(count) + " files");
-                vTaskDelay(pdMS_TO_TICKS(100));
-                mp3_player_->Next();
+                // Don't auto-play if called from LLM (delayed playback handled separately)
+                if (!from_llm) {
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    mp3_player_->Next();
+                }
             } else {
                 GetDisplay()->ShowNotification("No MP3 files");
                 ESP_LOGW(TAG, "No MP3 files found in %s", SDCARD_MOUNT_POINT);
@@ -273,10 +297,21 @@ private:
                     if (music_mode_) {
                         return std::string("Đang phát nhạc rồi");
                     }
-                    StartMusicMode();
+                    // Called from LLM - delay music start until after LLM finishes speaking
+                    StartMusicMode(true);  // from_llm = true
                     if (music_mode_) {
                         int count = mp3_player_ ? mp3_player_->GetPlaylistSize() : 0;
-                        return std::string("Đã bật nhạc, tìm thấy " + std::to_string(count) + " bài hát");
+                        // Delay actual playback to avoid conflict with LLM speaking
+                        xTaskCreate([](void* arg) {
+                            auto* player = static_cast<Mp3Player*>(arg);
+                            // Wait for LLM to finish speaking
+                            vTaskDelay(pdMS_TO_TICKS(3000));
+                            if (player) {
+                                player->Next();
+                            }
+                            vTaskDelete(NULL);
+                        }, "music_delay", 2048, mp3_player_, 2, nullptr);
+                        return std::string("Đã bật nhạc, tìm thấy " + std::to_string(count) + " bài hát. Nhạc sẽ bắt đầu sau vài giây.");
                     } else {
                         return std::string("Không thể phát nhạc. Kiểm tra thẻ nhớ SD");
                     }
@@ -373,7 +408,102 @@ public:
         InitializeSt7789Display();
         InitializeSdCard();
         InitializeMusicTools();
+        InitializeRobotControl();
+        RegisterWifiEventHandler();
+        SetupNetworkCallback();
         GetBacklight()->RestoreBrightness();
+    }
+
+    void InitializeRobotControl() {
+        ESP_LOGI(TAG, "Initializing robot control...");
+        
+        // Initialize servos
+        robot_control_init();
+        robot_initialized_ = true;
+        
+        // Start robot control task
+        xTaskCreate([](void* arg) {
+            robot_control_task(arg);
+        }, "robot_task", 8192, nullptr, 5, nullptr);
+        
+        // Register MCP tools for LLM control
+        register_robot_mcp_tools();
+        
+        ESP_LOGI(TAG, "Robot control initialized");
+    }
+
+    void StartRobotWebserver() {
+        if (!robot_initialized_) {
+            ESP_LOGW(TAG, "Robot not initialized, skipping webserver");
+            return;
+        }
+        if (robot_webserver_) {
+            ESP_LOGW(TAG, "Robot webserver already running");
+            return;
+        }
+        robot_webserver_ = webserver_start();
+        if (robot_webserver_) {
+            ESP_LOGI(TAG, "Robot webserver started on port 80");
+        }
+    }
+
+    static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                                   int32_t event_id, void* event_data) {
+        auto* self = static_cast<XINGZHI_CUBE_1_54TFT_WIFI*>(arg);
+        if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+            ESP_LOGI(TAG, "WiFi connected, starting robot webserver...");
+            self->StartRobotWebserver();
+        }
+    }
+
+    void RegisterWifiEventHandler() {
+        esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, this);
+    }
+
+    void SetupNetworkCallback() {
+        // Get the existing callback if any
+        auto parent_callback = network_event_callback_;
+        
+        // Set our callback that wraps the parent
+        SetNetworkEventCallback([this, parent_callback](NetworkEvent event, const std::string& data) {
+            // Call parent callback if it exists
+            if (parent_callback) {
+                parent_callback(event, data);
+            }
+            
+            // Start webserver when network connected
+            if (event == NetworkEvent::Connected) {
+                ESP_LOGI(TAG, "Network callback: Connected event received, starting webserver...");
+                StartRobotWebserver();
+            }
+        });
+        
+        // Also create a delayed task to ensure webserver starts even if callback missed
+        xTaskCreate([](void* arg) {
+            auto* self = static_cast<XINGZHI_CUBE_1_54TFT_WIFI*>(arg);
+            // Wait up to 30 seconds for WiFi to get IP, polling every 2s
+            for (int i = 0; i < 15; i++) {
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                if (self->robot_webserver_) {
+                    ESP_LOGI(TAG, "Webserver already started by event callback");
+                    vTaskDelete(NULL);
+                    return;
+                }
+                // Check if WiFi station has an IP address
+                esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+                if (netif) {
+                    esp_netif_ip_info_t ip_info;
+                    if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK && ip_info.ip.addr != 0) {
+                        ESP_LOGI(TAG, "Delayed check: WiFi has IP, starting webserver...");
+                        self->StartRobotWebserver();
+                        vTaskDelete(NULL);
+                        return;
+                    }
+                }
+            }
+            ESP_LOGW(TAG, "Delayed webserver check: WiFi not connected after 30s, giving up");
+            vTaskDelete(NULL);
+        }, "web_start", 3072, this, 1, nullptr);
     }
 
     virtual AudioCodec* GetAudioCodec() override {
@@ -410,5 +540,23 @@ public:
         WifiBoard::SetPowerSaveLevel(level);
     }
 };
+
+// C wrapper functions for Mp3Player (used by robot_control.c)
+extern "C" {
+    bool Mp3Player_Play(void* player, const char* path) {
+        auto* mp3_player = static_cast<Mp3Player*>(player);
+        return mp3_player->Play(std::string(path));
+    }
+    
+    int Mp3Player_GetState(void* player) {
+        auto* mp3_player = static_cast<Mp3Player*>(player);
+        return static_cast<int>(mp3_player->GetState());
+    }
+    
+    void Mp3Player_Stop(void* player) {
+        auto* mp3_player = static_cast<Mp3Player*>(player);
+        mp3_player->Stop();
+    }
+}
 
 DECLARE_BOARD(XINGZHI_CUBE_1_54TFT_WIFI);
