@@ -145,6 +145,7 @@ typedef enum {
     ACTION_MOVE_STOP,
     ACTION_TURN_LEFT,
     ACTION_TURN_RIGHT,
+    ACTION_SPIN,
     ACTION_RHYTHM_LEFT,
     ACTION_RHYTHM_RIGHT,
     ACTION_COMBO1,
@@ -315,6 +316,7 @@ void ninja_stop_music(void);
 // Foot rotation functions (for web control)
 void ninja_rotate_left_foot(int speed, int duration_ms);
 void ninja_rotate_right_foot(int speed, int duration_ms);
+void ninja_spin_in_place(int speed);
 
 // Main control loop task
 void robot_control_task(void *pvParameters);

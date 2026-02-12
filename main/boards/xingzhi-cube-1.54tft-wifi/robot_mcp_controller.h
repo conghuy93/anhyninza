@@ -336,7 +336,100 @@ static void register_robot_mcp_tools() {
         }
     );
     
-    ESP_LOGI(TAG_MCP, "Robot MCP tools registered (8 tools)");
+    // LED color control
+    mcp_server.AddTool(
+        "self.robot.led.color",
+        "Đặt màu LED RGB. r: 0-255, g: 0-255, b: 0-255. Màu phổ biến: đỏ(255,0,0), xanh lá(0,255,0), xanh dương(0,0,255), vàng(255,255,0), tím(255,0,255), trắng(255,255,255).",
+        PropertyList({
+            Property("r", kPropertyTypeInteger),
+            Property("g", kPropertyTypeInteger),
+            Property("b", kPropertyTypeInteger),
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            int r = 255, g = 255, b = 255;
+            
+            try { r = properties["r"].value<int>(); } catch(...) {}
+            try { g = properties["g"].value<int>(); } catch(...) {}
+            try { b = properties["b"].value<int>(); } catch(...) {}
+            
+            if (r < 0) r = 0;
+            if (r > 255) r = 255;
+            if (g < 0) g = 0;
+            if (g > 255) g = 255;
+            if (b < 0) b = 0;
+            if (b > 255) b = 255;
+            
+            ninja_led_set_color(r, g, b);
+            ESP_LOGI(TAG_MCP, "LED color: R=%d G=%d B=%d", r, g, b);
+            return std::string("Đã đặt LED màu RGB(" + std::to_string(r) + "," + std::to_string(g) + "," + std::to_string(b) + ")");
+        }
+    );
+    
+    // LED brightness control
+    mcp_server.AddTool(
+        "self.robot.led.brightness",
+        "Đặt độ sáng LED. brightness: 0-100 (0=tắt, 100=sáng nhất).",
+        PropertyList({
+            Property("brightness", kPropertyTypeInteger),
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            int brightness = 50;
+            
+            try { brightness = properties["brightness"].value<int>(); } catch(...) {}
+            
+            if (brightness < 0) brightness = 0;
+            if (brightness > 100) brightness = 100;
+            
+            ninja_led_set_brightness(brightness);
+            ESP_LOGI(TAG_MCP, "LED brightness: %d%%", brightness);
+            return std::string("Đã đặt độ sáng LED " + std::to_string(brightness) + "%");
+        }
+    );
+    
+    // LED mode control
+    mcp_server.AddTool(
+        "self.robot.led.mode",
+        "Đặt chế độ hiệu ứng LED. mode: off, solid, rainbow, breathing, chase, blink, strobe, fade, comet, sparkle, theater.",
+        PropertyList({
+            Property("mode", kPropertyTypeString),
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            std::string mode_str = "solid";
+            try { mode_str = properties["mode"].value<std::string>(); } catch(...) {}
+            
+            led_mode_t mode = LED_MODE_SOLID;
+            if (mode_str == "off") mode = LED_MODE_OFF;
+            else if (mode_str == "solid") mode = LED_MODE_SOLID;
+            else if (mode_str == "rainbow") mode = LED_MODE_RAINBOW;
+            else if (mode_str == "breathing") mode = LED_MODE_BREATHING;
+            else if (mode_str == "chase") mode = LED_MODE_CHASE;
+            else if (mode_str == "blink") mode = LED_MODE_BLINK;
+            else if (mode_str == "strobe") mode = LED_MODE_STROBE;
+            else if (mode_str == "fade") mode = LED_MODE_FADE;
+            else if (mode_str == "comet") mode = LED_MODE_COMET;
+            else if (mode_str == "sparkle") mode = LED_MODE_SPARKLE;
+            else if (mode_str == "theater") mode = LED_MODE_THEATER_CHASE;
+            
+            ninja_led_set_mode(mode);
+            ESP_LOGI(TAG_MCP, "LED mode: %s", mode_str.c_str());
+            return std::string("Đã đặt LED chế độ " + mode_str);
+        }
+    );
+    
+    // LED off
+    mcp_server.AddTool(
+        "self.robot.led.off",
+        "Tắt toàn bộ LED.",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            (void)properties;
+            ninja_led_off();
+            ESP_LOGI(TAG_MCP, "LED off");
+            return std::string("Đã tắt LED");
+        }
+    );
+    
+    ESP_LOGI(TAG_MCP, "Robot MCP tools registered (12 tools)");
 }
 
 #endif // ROBOT_MCP_CONTROLLER_H

@@ -300,6 +300,19 @@ static const char html_content[] =
 "<button class=\"btn\" style=\"background:#e91e63\" id=\"btnTiltLeft\">⬅️ Tilt L</button>"
 "<button class=\"btn\" style=\"background:#9c27b0\" id=\"btnTiltRight\">➡️ Tilt R</button>"
 "</div>"
+"<div class=\"calibration\" style=\"margin-top:10px;background:#1a2530;border:2px solid #9c27b0;padding:10px\">"
+"<h2 style=\"color:#9c27b0;font-size:0.95em;margin-bottom:8px\">🔄 Quay Tại Chỗ (RF+LF Spin)</h2>"
+"<div style=\"background:#2c3e50;padding:10px;border-radius:8px\">"
+"<div style=\"display:flex;align-items:center;gap:10px;margin-bottom:8px\">"
+"<label style=\"color:#e91e63;font-size:0.8em;min-width:50px\">↺ Trái</label>"
+"<input type=\"range\" min=\"-100\" max=\"100\" value=\"0\" id=\"spinSpeed\" style=\"flex:1\">"
+"<label style=\"color:#9c27b0;font-size:0.8em;min-width:50px;text-align:right\">Phải ↻</label>"
+"</div>"
+"<div style=\"text-align:center;color:#3498db;font-size:0.85em;margin-bottom:8px\">Tốc độ: <span id=\"spinSpeedDisp\" style=\"font-weight:bold\">0</span></div>"
+"<button class=\"btn\" style=\"background:#9c27b0;width:100%;font-size:0.9em\" id=\"btnSpin\">🔄 SPIN</button>"
+"<div style=\"font-size:0.6em;color:#7f8c8d;margin-top:5px;text-align:center\">Kéo thanh trượt sang trái (âm) để quay trái, sang phải (dương) để quay phải. Nhấn SPIN để dừng.</div>"
+"</div>"
+"</div>"
 "<div class=\"buttons\">"
 "<button class=\"btn\" style=\"background:#8e44ad\" id=\"btnRhythmL\">💃 L.Leg (34-45-65)</button>"
 "<button class=\"btn\" style=\"background:#2980b9\" id=\"btnRhythmR\">💃 R.Leg (140-150-170)</button>"
@@ -644,6 +657,8 @@ static const char html_content[] =
 "document.getElementById('btnStopFoot').onclick=()=>{fb('btnStopFoot');fetch('/testfoot?foot=stop');};"
 "document.getElementById('btnTiltLeft').onclick=()=>{fb('btnTiltLeft');fetch('/tilt?dir=left');};"
 "document.getElementById('btnTiltRight').onclick=()=>{fb('btnTiltRight');fetch('/tilt?dir=right');};"
+"document.getElementById('spinSpeed').oninput=function(){const v=this.value;document.getElementById('spinSpeedDisp').textContent=v;if(v!=0){fetch('/spin?speed='+v);}};"
+"document.getElementById('btnSpin').onclick=()=>{document.getElementById('spinSpeed').value=0;document.getElementById('spinSpeedDisp').textContent='0';fetch('/spin?speed=0');};"
 "document.getElementById('btnRhythmL').onclick=()=>{const b=document.getElementById('btnRhythmL');b.classList.add('running');fetch('/rhythm?leg=left').finally(()=>b.classList.remove('running'));};"
 "document.getElementById('btnRhythmR').onclick=()=>{const b=document.getElementById('btnRhythmR');b.classList.add('running');fetch('/rhythm?leg=right').finally(()=>b.classList.remove('running'));};"
 "document.getElementById('btnTurnLeft').onclick=()=>{const b=document.getElementById('btnTurnLeft');b.classList.add('running');const spd=document.getElementById('turnLeftSpeed').value;fetch('/turn?dir=left&speed='+spd).finally(()=>b.classList.remove('running'));};"
@@ -1327,6 +1342,37 @@ static esp_err_t servo_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// Handler for in-place spin rotation
+static esp_err_t spin_handler(httpd_req_t *req) {
+    int speed = get_query_param_int(req, "speed", 0);
+    
+    // Clamp speed to -100...100
+    if (speed < -100) speed = -100;
+    if (speed > 100) speed = 100;
+    
+    ESP_LOGI(TAG, "Spin: speed=%d (%s)", speed, 
+             speed == 0 ? "stop" : (speed < 0 ? "left" : "right"));
+    
+    // Record action if recording
+    recording_state_t *rec = get_recording_state();
+    if (rec->is_recording && speed != 0) {
+        record_action(ACTION_SPIN, speed, 0, 500);
+        ESP_LOGI(TAG, "🎬 REC Spin speed=%d", speed);
+    }
+    
+    ninja_spin_in_place(speed);
+    
+    char resp[64];
+    if (speed == 0) {
+        snprintf(resp, sizeof(resp), "Spin stopped");
+    } else {
+        snprintf(resp, sizeof(resp), "Spinning %s at speed %d", 
+                 speed < 0 ? "left" : "right", speed < 0 ? -speed : speed);
+    }
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
 // Handler to disable manual mode
 static esp_err_t manualoff_handler(httpd_req_t *req) {
     // Record home action if recording
@@ -1471,6 +1517,7 @@ static const char* web_action_type_to_string(action_type_t type) {
         case ACTION_MOVE_STOP: return "move_stop";
         case ACTION_TURN_LEFT: return "turn_left";
         case ACTION_TURN_RIGHT: return "turn_right";
+        case ACTION_SPIN: return "spin";
         default: return "unknown";
     }
 }
@@ -1502,6 +1549,7 @@ static action_type_t web_string_to_action_type(const char* str) {
     if (strcmp(str, "move_stop") == 0) return ACTION_MOVE_STOP;
     if (strcmp(str, "turn_left") == 0) return ACTION_TURN_LEFT;
     if (strcmp(str, "turn_right") == 0) return ACTION_TURN_RIGHT;
+    if (strcmp(str, "spin") == 0) return ACTION_SPIN;
     return ACTION_NONE;
 }
 
@@ -1836,6 +1884,13 @@ static const httpd_uri_t uri_servo = {
     .user_ctx = NULL
 };
 
+static const httpd_uri_t uri_spin = {
+    .uri = "/spin",
+    .method = HTTP_GET,
+    .handler = spin_handler,
+    .user_ctx = NULL
+};
+
 static const httpd_uri_t uri_manualoff = {
     .uri = "/manualoff",
     .method = HTTP_GET,
@@ -1914,6 +1969,7 @@ httpd_handle_t webserver_start(void) {
         httpd_register_uri_handler(server, &uri_rhythm);
         httpd_register_uri_handler(server, &uri_turn);
         httpd_register_uri_handler(server, &uri_servo);
+        httpd_register_uri_handler(server, &uri_spin);
         httpd_register_uri_handler(server, &uri_manualoff);
         httpd_register_uri_handler(server, &uri_combo);
         httpd_register_uri_handler(server, &uri_record);

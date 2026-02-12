@@ -984,6 +984,56 @@ void ninja_rotate_right_foot(int speed, int duration_ms) {
     servo_write(SERVO_CH_RIGHT_FOOT, start_angle);
 }
 
+// In-place rotation using both feet
+// speed: -100 to 100 (negative = counterclockwise/left, positive = clockwise/right)
+void ninja_spin_in_place(int speed) {
+    if (speed == 0) {
+        // Stop spinning - return to neutral
+        calibration_t* cal = get_calibration();
+        servo_write(SERVO_CH_LEFT_FOOT, cal->lf_neutral);
+        servo_write(SERVO_CH_RIGHT_FOOT, cal->rf_neutral);
+        ESP_LOGI(TAG, "Spin stopped - returned to neutral");
+        return;
+    }
+    
+    calibration_t* cal = get_calibration();
+    
+    // Map speed (-100 to 100) to servo angles
+    // - For left turn (speed < 0): LF goes backward, RF goes forward
+    // - For right turn (speed > 0): LF goes forward, RF goes backward
+    
+    int abs_speed = (speed < 0) ? -speed : speed;
+    if (abs_speed > 100) abs_speed = 100;
+    
+    // Calculate target angles based on speed magnitude
+    // Speed 100 = full rotation (0 or 180 degrees from neutral)
+    // Speed 50 = half rotation
+    float rotation_amount = (float)abs_speed / 100.0f;
+    
+    int lf_angle, rf_angle;
+    
+    if (speed < 0) {
+        // Counterclockwise (left turn)
+        lf_angle = cal->lf_neutral - (int)(90 * rotation_amount);  // LF backward
+        rf_angle = cal->rf_neutral + (int)(90 * rotation_amount);  // RF forward
+    } else {
+        // Clockwise (right turn)
+        lf_angle = cal->lf_neutral + (int)(90 * rotation_amount);  // LF forward
+        rf_angle = cal->rf_neutral - (int)(90 * rotation_amount);  // RF backward
+    }
+    
+    // Constrain angles to valid servo range
+    if (lf_angle < 0) lf_angle = 0;
+    if (lf_angle > 180) lf_angle = 180;
+    if (rf_angle < 0) rf_angle = 0;
+    if (rf_angle > 180) rf_angle = 180;
+    
+    servo_write(SERVO_CH_LEFT_FOOT, lf_angle);
+    servo_write(SERVO_CH_RIGHT_FOOT, rf_angle);
+    
+    ESP_LOGI(TAG, "Spinning: speed=%d, LF=%d°, RF=%d°", speed, lf_angle, rf_angle);
+}
+
 // ========== SLEEP PREPARATION ==========
 
 void robot_prepare_sleep(void) {
@@ -1274,6 +1324,15 @@ void play_action(uint8_t slot) {
                     control_state.j_y = 0;
                     control_state.manual_mode = true;
                 }
+                break;
+            }
+            
+            case ACTION_SPIN: {
+                int speed = step->param1;  // -100 to 100
+                int duration = step->duration_ms > 0 ? step->duration_ms : 500;
+                ninja_spin_in_place(speed);
+                vTaskDelay(pdMS_TO_TICKS(duration));
+                ninja_spin_in_place(0);  // Stop spinning
                 break;
             }
                 
