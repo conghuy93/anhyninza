@@ -1629,7 +1629,7 @@ static esp_err_t action_json_handler(httpd_req_t *req) {
         
         // Read POST body
         int total_len = req->content_len;
-        if (total_len <= 0 || total_len > 4096) {
+        if (total_len <= 0 || total_len > 16384) {
             httpd_resp_sendstr(req, "❌ Invalid JSON data length!");
             return ESP_OK;
         }

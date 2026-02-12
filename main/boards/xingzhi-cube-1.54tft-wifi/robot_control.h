@@ -125,7 +125,7 @@ typedef struct {
 #define CAL_DEFAULT_BATTERY_ALERT true
 
 // Action recording
-#define MAX_ACTIONS 20
+#define MAX_ACTIONS 100
 #define MAX_ACTION_SLOTS 3
 
 typedef enum {
