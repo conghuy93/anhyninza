@@ -114,6 +114,18 @@ public:
     AudioService& GetAudioService() { return audio_service_; }
     
     /**
+     * Send text chat message to AI server
+     * Opens audio channel if needed and sends the text
+     * Returns true if message was sent successfully
+     */
+    bool SendChatText(const std::string& text);
+    
+    /**
+     * Check if protocol is connected to server
+     */
+    bool IsConnectedToServer() const;
+    
+    /**
      * Reset protocol resources (thread-safe)
      * Can be called from any task to release resources allocated after network connected
      * This includes closing audio channel, resetting protocol and ota objects

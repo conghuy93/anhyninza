@@ -67,6 +67,17 @@ void Mp3Player::CleanupDecodeResources() {
 bool Mp3Player::Play(const std::string& filepath) {
     Stop();
     
+    // Free any old PSRAM buffers from self-terminated tasks
+    // These couldn't be freed earlier because the task was still on its stack
+    if (old_psram_task_buffer_) {
+        heap_caps_free(old_psram_task_buffer_);
+        old_psram_task_buffer_ = nullptr;
+    }
+    if (old_psram_stack_buffer_) {
+        heap_caps_free(old_psram_stack_buffer_);
+        old_psram_stack_buffer_ = nullptr;
+    }
+    
     xSemaphoreTake(mutex_, portMAX_DELAY);
     current_track_ = filepath;
     state_ = Mp3PlayerState::PLAYING;
@@ -79,15 +90,45 @@ bool Mp3Player::Play(const std::string& filepath) {
         on_track_changed_(filepath);
     }
     
-    BaseType_t ret = xTaskCreatePinnedToCore(PlayerTask, "mp3_player", 32768, this, 3, &player_task_, 1);
-    if (ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create player task");
-        state_ = Mp3PlayerState::STOPPED;
-        playback_error_ = true;
-        return false;
+    // Try to create task with stack in PSRAM first (more memory available)
+    // Stack size: 24KB for MP3 decoding + resampling (44100->24000 Hz stereo needs extra buffers)
+    // Note: minimp3 decoder uses ~10KB, resampler needs ~6KB more for stereo conversion
+    
+    // IMPORTANT: TCB (StaticTask_t) MUST be in internal RAM, only stack can be in PSRAM
+    // FreeRTOS assertion fails if TCB is in PSRAM: xPortCheckValidTCBMem(pxTaskBuffer)
+    static const size_t PLAYER_STACK_SIZE = 24 * 1024;  // 24KB for stereo + resampling
+    StaticTask_t* task_buffer = (StaticTask_t*)heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    StackType_t* stack_buffer = (StackType_t*)heap_caps_malloc(PLAYER_STACK_SIZE, MALLOC_CAP_SPIRAM);
+    
+    if (task_buffer && stack_buffer) {
+        player_task_ = xTaskCreateStaticPinnedToCore(
+            PlayerTask, "mp3_player", PLAYER_STACK_SIZE, this, 3,
+            stack_buffer, task_buffer, 1);
+        if (player_task_) {
+            // Save pointers for cleanup in Stop()
+            psram_task_buffer_ = task_buffer;  // Actually internal RAM for TCB
+            psram_stack_buffer_ = stack_buffer; // PSRAM for stack
+            ESP_LOGI(TAG, "Created MP3 player task with PSRAM stack (%dKB, TCB in internal RAM)", PLAYER_STACK_SIZE / 1024);
+            return true;
+        }
+        // Failed, free buffers
+        heap_caps_free(task_buffer);
+        heap_caps_free(stack_buffer);
+    } else {
+        // Free any partial allocations
+        if (task_buffer) heap_caps_free(task_buffer);
+        if (stack_buffer) heap_caps_free(stack_buffer);
     }
     
-    return true;
+    // Fallback: PSRAM not available - MP3 playback requires PSRAM for stack
+    // Internal SRAM is not enough for 44100Hz stereo MP3 with resampling
+    psram_task_buffer_ = nullptr;
+    psram_stack_buffer_ = nullptr;
+    ESP_LOGE(TAG, "PSRAM not available - MP3 playback requires PSRAM for task stack");
+    state_ = Mp3PlayerState::STOPPED;
+    playback_error_ = true;
+    if (on_error_) on_error_("PSRAM required for MP3");
+    return false;
 }
 
 void Mp3Player::Pause() {
@@ -105,6 +146,8 @@ void Mp3Player::Resume() {
 }
 
 void Mp3Player::Stop() {
+    bool task_was_running = (player_task_ != nullptr);
+    
     if (player_task_) {
         stop_requested_ = true;
         pause_requested_ = false;
@@ -122,6 +165,31 @@ void Mp3Player::Stop() {
             // Clean up resources that the killed task left behind
             CleanupDecodeResources();
         }
+    }
+    
+    // Free PSRAM task stack buffers if allocated
+    // IMPORTANT: Only free if we actually stopped a running task
+    // If task self-terminated (player_task_ was nullptr), the task might still
+    // be on its stack executing vTaskDelete() - freeing would cause crash!
+    if (task_was_running) {
+        if (psram_task_buffer_) {
+            heap_caps_free(psram_task_buffer_);
+            psram_task_buffer_ = nullptr;
+        }
+        if (psram_stack_buffer_) {
+            heap_caps_free(psram_stack_buffer_);
+            psram_stack_buffer_ = nullptr;
+        }
+    }
+    
+    // Also free any old PSRAM buffers from previous self-terminated tasks
+    if (old_psram_task_buffer_) {
+        heap_caps_free(old_psram_task_buffer_);
+        old_psram_task_buffer_ = nullptr;
+    }
+    if (old_psram_stack_buffer_) {
+        heap_caps_free(old_psram_stack_buffer_);
+        old_psram_stack_buffer_ = nullptr;
     }
     
     state_ = Mp3PlayerState::STOPPED;
@@ -154,6 +222,18 @@ void Mp3Player::Previous() {
     xSemaphoreGive(mutex_);
     
     Play(prev_track);
+}
+
+void Mp3Player::PlayAt(int index) {
+    if (playlist_.empty()) return;
+    if (index < 0 || index >= (int)playlist_.size()) return;
+    
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    current_index_ = index;
+    std::string track = playlist_[current_index_];
+    xSemaphoreGive(mutex_);
+    
+    Play(track);
 }
 
 void Mp3Player::SetPlaylist(const std::vector<std::string>& files) {
@@ -250,6 +330,11 @@ void Mp3Player::PlayerTask(void* param) {
     Mp3Player* player = static_cast<Mp3Player*>(param);
     player->DecodeAndPlay(player->current_track_);
     
+    // Save pointers to our PSRAM buffers BEFORE calling callbacks
+    // because callbacks might trigger Play() which allocates NEW buffers
+    void* my_task_buf = player->psram_task_buffer_;
+    void* my_stack_buf = player->psram_stack_buffer_;
+    
     player->player_task_ = nullptr;
     player->state_ = Mp3PlayerState::STOPPED;
     
@@ -276,6 +361,16 @@ void Mp3Player::PlayerTask(void* param) {
                 player->on_error_("Too many failures");
             }
         }
+    }
+    
+    // Mark our PSRAM buffers for cleanup by the next Play() call
+    // We can't free them here because we're still running on this stack!
+    // Check if a new task was created (buffers changed) - if so, mark ours as old
+    if (player->psram_task_buffer_ != my_task_buf && my_task_buf) {
+        player->old_psram_task_buffer_ = my_task_buf;
+    }
+    if (player->psram_stack_buffer_ != my_stack_buf && my_stack_buf) {
+        player->old_psram_stack_buffer_ = my_stack_buf;
     }
     
     vTaskDelete(nullptr);

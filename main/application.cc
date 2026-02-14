@@ -19,6 +19,14 @@
 
 #define TAG "Application"
 
+// Forward declare for chat history (implemented in board webserver)
+// Weak attribute allows boards without this function to compile
+extern "C" __attribute__((weak)) void add_chat_message(const char* role, const char* content) {
+    // Default implementation does nothing - boards with webserver will override
+    (void)role;
+    (void)content;
+}
+
 
 Application::Application() {
     event_group_ = xEventGroupCreate();
@@ -553,6 +561,8 @@ void Application::InitializeProtocol() {
                     ESP_LOGI(TAG, "<< %s", text->valuestring);
                     Schedule([display, message = std::string(text->valuestring)]() {
                         display->SetChatMessage("assistant", message.c_str());
+                        // Save AI response to chat history for web UI
+                        add_chat_message("assistant", message.c_str());
                     });
                 }
             }
@@ -562,6 +572,8 @@ void Application::InitializeProtocol() {
                 ESP_LOGI(TAG, ">> %s", text->valuestring);
                 Schedule([display, message = std::string(text->valuestring)]() {
                     display->SetChatMessage("user", message.c_str());
+                    // Save user message to chat history for web UI
+                    add_chat_message("user", message.c_str());
                 });
             }
         } else if (strcmp(type->valuestring, "llm") == 0) {
@@ -1094,5 +1106,49 @@ void Application::ResetProtocol() {
         // Reset protocol
         protocol_.reset();
     });
+}
+
+bool Application::IsConnectedToServer() const {
+    return protocol_ && protocol_->IsAudioChannelOpened();
+}
+
+bool Application::SendChatText(const std::string& text) {
+    if (!protocol_) {
+        ESP_LOGE(TAG, "Protocol not initialized, cannot send chat text");
+        return false;
+    }
+    
+    // Validate and truncate text if needed (max 1500 chars)
+    const size_t MAX_TEXT_LENGTH = 1500;
+    std::string text_to_send = text;
+    if (text.length() > MAX_TEXT_LENGTH) {
+        text_to_send = text.substr(0, MAX_TEXT_LENGTH);
+        ESP_LOGW(TAG, "Text truncated from %d to %d chars", (int)text.length(), MAX_TEXT_LENGTH);
+    }
+    
+    // If audio channel is not opened, try to open it
+    if (!protocol_->IsAudioChannelOpened()) {
+        ESP_LOGI(TAG, "Opening audio channel for text chat...");
+        if (!protocol_->OpenAudioChannel()) {
+            ESP_LOGE(TAG, "Failed to open audio channel for text chat");
+            return false;
+        }
+    }
+    
+    // Disable voice processing - we're sending text, not audio
+    audio_service_.EnableVoiceProcessing(false);
+    audio_service_.EnableWakeWordDetection(false);
+    
+    // TRICK: Send text as "wake word detected" message
+    // Server will treat this as STT result and process with LLM
+    // This is how kiki board does it - see otto_webserver.cc
+    ESP_LOGI(TAG, "Sending text as wake word: %s", text_to_send.c_str());
+    protocol_->SendWakeWordDetected(text_to_send);
+    
+    // Tell server we stopped listening (text input complete)
+    protocol_->SendStopListening();
+    ESP_LOGI(TAG, "Text sent to server, waiting for AI response");
+    
+    return true;
 }
 

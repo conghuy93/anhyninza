@@ -138,6 +138,15 @@ private:
     lv_obj_t* volume_value_label_ = nullptr;
     esp_timer_handle_t volume_popup_timer_ = nullptr;
 
+    // Playlist selection mode
+    bool playlist_selection_mode_ = false;
+    int playlist_selected_index_ = 0;
+    static constexpr int PLAYLIST_VISIBLE_ITEMS = 5;  // Number of items visible on screen
+    lv_obj_t* playlist_panel_ = nullptr;
+    lv_obj_t* playlist_title_label_ = nullptr;
+    lv_obj_t* playlist_items_[7] = {nullptr};  // Max visible items + buffer
+    esp_timer_handle_t playlist_timeout_timer_ = nullptr;
+
     // Get text font from theme (supports Vietnamese/Chinese), fallback to montserrat
     const lv_font_t* GetTextFont() {
         if (display_ && display_->GetTheme()) {
@@ -193,6 +202,194 @@ private:
             lv_obj_align(spectrum_bars_[i], LV_ALIGN_BOTTOM_MID, 
                         (i - SPECTRUM_BAR_COUNT/2) * 16 + 8, -10);
         }
+    }
+
+    // ===== Playlist Selection UI =====
+    void CreatePlaylistSelection() {
+        if (playlist_panel_) return;  // Already created
+        
+        lvgl_port_lock(0);
+        auto screen = lv_screen_active();
+        
+        // Full-screen panel for playlist selection
+        playlist_panel_ = lv_obj_create(screen);
+        lv_obj_set_size(playlist_panel_, 240, 240);
+        lv_obj_align(playlist_panel_, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_set_style_bg_color(playlist_panel_, lv_color_hex(0x1a1a2e), 0);
+        lv_obj_set_style_bg_grad_color(playlist_panel_, lv_color_hex(0x16213e), 0);
+        lv_obj_set_style_bg_grad_dir(playlist_panel_, LV_GRAD_DIR_VER, 0);
+        lv_obj_set_style_border_width(playlist_panel_, 0, 0);
+        lv_obj_set_style_radius(playlist_panel_, 0, 0);
+        lv_obj_set_style_pad_all(playlist_panel_, 0, 0);
+        lv_obj_add_flag(playlist_panel_, LV_OBJ_FLAG_HIDDEN);
+        
+        // Title label
+        playlist_title_label_ = lv_label_create(playlist_panel_);
+        lv_obj_set_style_text_font(playlist_title_label_, GetTextFont(), 0);
+        lv_obj_set_style_text_color(playlist_title_label_, lv_color_hex(0x3498db), 0);
+        lv_label_set_text(playlist_title_label_, LV_SYMBOL_LIST " Chon bai hat");
+        lv_obj_align(playlist_title_label_, LV_ALIGN_TOP_MID, 0, 10);
+        
+        // Create playlist item labels (5 visible items)
+        for (int i = 0; i < PLAYLIST_VISIBLE_ITEMS; i++) {
+            playlist_items_[i] = lv_label_create(playlist_panel_);
+            lv_obj_set_style_text_font(playlist_items_[i], GetTextFont(), 0);
+            lv_obj_set_style_text_color(playlist_items_[i], lv_color_hex(0xecf0f1), 0);
+            lv_obj_set_width(playlist_items_[i], 220);
+            lv_obj_set_style_pad_left(playlist_items_[i], 10, 0);
+            lv_obj_set_style_pad_ver(playlist_items_[i], 5, 0);
+            lv_label_set_long_mode(playlist_items_[i], LV_LABEL_LONG_SCROLL_CIRCULAR);
+            lv_label_set_text(playlist_items_[i], "");
+            lv_obj_align(playlist_items_[i], LV_ALIGN_TOP_LEFT, 5, 40 + i * 38);
+        }
+        
+        // Auto-hide timer (10 seconds)
+        esp_timer_create_args_t timer_args = {};
+        timer_args.callback = [](void* arg) {
+            auto* self = static_cast<XINGZHI_CUBE_1_54TFT_WIFI*>(arg);
+            self->HidePlaylistSelection();
+        };
+        timer_args.arg = this;
+        timer_args.name = "playlist_timeout";
+        esp_timer_create(&timer_args, &playlist_timeout_timer_);
+        
+        lvgl_port_unlock();
+    }
+
+    void ShowPlaylistSelection() {
+        if (!playlist_panel_) {
+            CreatePlaylistSelection();
+        }
+        if (!playlist_panel_ || !mp3_player_) return;
+        
+        playlist_selection_mode_ = true;
+        // Start at current playing index
+        playlist_selected_index_ = mp3_player_->GetCurrentIndex();
+        if (playlist_selected_index_ < 0) playlist_selected_index_ = 0;
+        
+        UpdatePlaylistSelection();
+        
+        lvgl_port_lock(0);
+        lv_obj_remove_flag(playlist_panel_, LV_OBJ_FLAG_HIDDEN);
+        // Hide music panel while selecting
+        if (music_panel_) {
+            lv_obj_add_flag(music_panel_, LV_OBJ_FLAG_HIDDEN);
+        }
+        lvgl_port_unlock();
+        
+        // Reset timeout timer
+        esp_timer_stop(playlist_timeout_timer_);
+        esp_timer_start_once(playlist_timeout_timer_, 10000000);  // 10 seconds
+    }
+
+    void UpdatePlaylistSelection() {
+        if (!playlist_panel_ || !mp3_player_) return;
+        
+        int playlist_size = mp3_player_->GetPlaylistSize();
+        if (playlist_size == 0) return;
+        
+        // Calculate visible range (center selected item)
+        int start_index = playlist_selected_index_ - PLAYLIST_VISIBLE_ITEMS / 2;
+        if (start_index < 0) start_index = 0;
+        if (start_index + PLAYLIST_VISIBLE_ITEMS > playlist_size) {
+            start_index = playlist_size - PLAYLIST_VISIBLE_ITEMS;
+            if (start_index < 0) start_index = 0;
+        }
+        
+        lvgl_port_lock(0);
+        
+        // Update title with count
+        char title[64];
+        snprintf(title, sizeof(title), LV_SYMBOL_LIST " Chon bai (%d/%d)", 
+                 playlist_selected_index_ + 1, playlist_size);
+        lv_label_set_text(playlist_title_label_, title);
+        
+        // Update visible items
+        for (int i = 0; i < PLAYLIST_VISIBLE_ITEMS; i++) {
+            int item_index = start_index + i;
+            
+            if (item_index >= playlist_size) {
+                lv_label_set_text(playlist_items_[i], "");
+                lv_obj_set_style_bg_opa(playlist_items_[i], LV_OPA_0, 0);
+                continue;
+            }
+            
+            // Get track name (extract filename without path and extension)
+            std::string track = mp3_player_->GetPlaylistEntry(item_index);
+            size_t pos = track.find_last_of("/");
+            std::string name = (pos != std::string::npos) ? track.substr(pos + 1) : track;
+            size_t ext = name.find_last_of(".");
+            if (ext != std::string::npos) name = name.substr(0, ext);
+            
+            // Format: index. name
+            char item_text[128];
+            snprintf(item_text, sizeof(item_text), "%d. %s", item_index + 1, name.c_str());
+            lv_label_set_text(playlist_items_[i], item_text);
+            
+            // Highlight selected item
+            if (item_index == playlist_selected_index_) {
+                lv_obj_set_style_bg_color(playlist_items_[i], lv_color_hex(0x3498db), 0);
+                lv_obj_set_style_bg_opa(playlist_items_[i], LV_OPA_50, 0);
+                lv_obj_set_style_text_color(playlist_items_[i], lv_color_hex(0xffffff), 0);
+                lv_obj_set_style_radius(playlist_items_[i], 5, 0);
+            } else {
+                lv_obj_set_style_bg_opa(playlist_items_[i], LV_OPA_0, 0);
+                lv_obj_set_style_text_color(playlist_items_[i], lv_color_hex(0xbdc3c7), 0);
+            }
+        }
+        
+        lvgl_port_unlock();
+        
+        // Reset timeout
+        esp_timer_stop(playlist_timeout_timer_);
+        esp_timer_start_once(playlist_timeout_timer_, 10000000);
+    }
+
+    void HidePlaylistSelection() {
+        playlist_selection_mode_ = false;
+        
+        if (playlist_panel_) {
+            lvgl_port_lock(0);
+            lv_obj_add_flag(playlist_panel_, LV_OBJ_FLAG_HIDDEN);
+            // Show music panel again
+            if (music_panel_ && music_mode_) {
+                lv_obj_remove_flag(music_panel_, LV_OBJ_FLAG_HIDDEN);
+            }
+            lvgl_port_unlock();
+        }
+        
+        esp_timer_stop(playlist_timeout_timer_);
+    }
+
+    void PlaylistMoveUp() {
+        if (!playlist_selection_mode_ || !mp3_player_) return;
+        
+        playlist_selected_index_--;
+        if (playlist_selected_index_ < 0) {
+            playlist_selected_index_ = mp3_player_->GetPlaylistSize() - 1;
+        }
+        UpdatePlaylistSelection();
+    }
+
+    void PlaylistMoveDown() {
+        if (!playlist_selection_mode_ || !mp3_player_) return;
+        
+        playlist_selected_index_++;
+        if (playlist_selected_index_ >= mp3_player_->GetPlaylistSize()) {
+            playlist_selected_index_ = 0;
+        }
+        UpdatePlaylistSelection();
+    }
+
+    void PlaylistSelectCurrent() {
+        if (!playlist_selection_mode_ || !mp3_player_) return;
+        
+        int idx = playlist_selected_index_;
+        HidePlaylistSelection();
+        
+        // Play the selected track
+        mp3_player_->PlayAt(idx);
+        GetDisplay()->ShowNotification("Dang phat...");
     }
 
     void CreateMusicDisplay() {
@@ -721,6 +918,12 @@ private:
         boot_button_.OnClick([this]() {
             power_save_timer_->WakeUp();
             
+            // If in playlist selection mode - select and play
+            if (playlist_selection_mode_) {
+                PlaylistSelectCurrent();
+                return;
+            }
+            
             // Check if streaming music - single click stops it
             int stream_state = StreamPlayer_GetState();
             if (stream_state == 2 || stream_state == 3) {  // BUFFERING=2 or PLAYING=3
@@ -753,6 +956,18 @@ private:
             app.ToggleChatState();
         });
 
+        boot_button_.OnLongPress([this]() {
+            power_save_timer_->WakeUp();
+            // Long press BOOT in music mode = show playlist selection
+            if (music_mode_ && mp3_player_ && mp3_player_->GetPlaylistSize() > 0) {
+                if (playlist_selection_mode_) {
+                    HidePlaylistSelection();
+                } else {
+                    ShowPlaylistSelection();
+                }
+            }
+        });
+
         boot_button_.OnDoubleClick([this]() {
             power_save_timer_->WakeUp();
             ToggleMusicMode();
@@ -760,6 +975,20 @@ private:
 
         volume_up_button_.OnClick([this]() {
             power_save_timer_->WakeUp();
+            
+            // In playlist selection mode - scroll up
+            if (playlist_selection_mode_) {
+                PlaylistMoveUp();
+                return;
+            }
+            
+            // In music mode - next track
+            if (music_mode_ && mp3_player_) {
+                mp3_player_->Next();
+                return;
+            }
+            
+            // Normal mode: adjust volume
             auto codec = GetAudioCodec();
             auto volume = codec->output_volume() + 10;
             if (volume > 100) {
@@ -771,16 +1000,39 @@ private:
 
         volume_up_button_.OnLongPress([this]() {
             power_save_timer_->WakeUp();
-            if (music_mode_ && mp3_player_) {
-                mp3_player_->Next();
-                return;
-            }
-            GetAudioCodec()->SetOutputVolume(100);
-            ShowVolumePopup(100);
+            // Long press = gradual volume increase
+            auto codec = GetAudioCodec();
+            auto volume = codec->output_volume() + 5;
+            if (volume > 100) volume = 100;
+            codec->SetOutputVolume(volume);
+            ShowVolumePopup(volume);
+        });
+
+        volume_up_button_.OnLongPressRepeat([this]() {
+            // Continue increasing volume slowly
+            auto codec = GetAudioCodec();
+            auto volume = codec->output_volume() + 5;
+            if (volume > 100) volume = 100;
+            codec->SetOutputVolume(volume);
+            ShowVolumePopup(volume);
         });
 
         volume_down_button_.OnClick([this]() {
             power_save_timer_->WakeUp();
+            
+            // In playlist selection mode - scroll down
+            if (playlist_selection_mode_) {
+                PlaylistMoveDown();
+                return;
+            }
+            
+            // In music mode - previous track
+            if (music_mode_ && mp3_player_) {
+                mp3_player_->Previous();
+                return;
+            }
+            
+            // Normal mode: adjust volume
             auto codec = GetAudioCodec();
             auto volume = codec->output_volume() - 10;
             if (volume < 0) {
@@ -792,12 +1044,21 @@ private:
 
         volume_down_button_.OnLongPress([this]() {
             power_save_timer_->WakeUp();
-            if (music_mode_ && mp3_player_) {
-                mp3_player_->Previous();
-                return;
-            }
-            GetAudioCodec()->SetOutputVolume(0);
-            ShowVolumePopup(0);
+            // Long press = gradual volume decrease
+            auto codec = GetAudioCodec();
+            auto volume = codec->output_volume() - 5;
+            if (volume < 0) volume = 0;
+            codec->SetOutputVolume(volume);
+            ShowVolumePopup(volume);
+        });
+
+        volume_down_button_.OnLongPressRepeat([this]() {
+            // Continue decreasing volume slowly
+            auto codec = GetAudioCodec();
+            auto volume = codec->output_volume() - 5;
+            if (volume < 0) volume = 0;
+            codec->SetOutputVolume(volume);
+            ShowVolumePopup(volume);
         });
     }
 
@@ -1430,6 +1691,218 @@ int SdPlayer_GetRepeatMode(void) {
         return static_cast<int>(g_sd_player->GetRepeatMode());
     }
     return 0;
+}
+
+// ====== Chat AI Integration ======
+#define MAX_CHAT_MESSAGES 20
+#define MAX_MESSAGE_LENGTH 512
+
+struct ChatMessage {
+    char role[16];        // "user" or "assistant"
+    char content[MAX_MESSAGE_LENGTH];
+    int64_t timestamp;
+};
+
+static ChatMessage s_chat_history[MAX_CHAT_MESSAGES];
+static int s_chat_count = 0;
+static int s_chat_write_idx = 0;
+static char s_last_ai_response[MAX_MESSAGE_LENGTH] = {0};
+static char s_chat_history_json[8192] = {0};  // Large buffer for JSON array
+static SemaphoreHandle_t s_chat_mutex = NULL;
+
+static void init_chat_storage() {
+    if (!s_chat_mutex) {
+        s_chat_mutex = xSemaphoreCreateMutex();
+    }
+}
+
+void add_chat_message(const char* role, const char* content) {
+    init_chat_storage();
+    if (xSemaphoreTake(s_chat_mutex, portMAX_DELAY)) {
+        ChatMessage* msg = &s_chat_history[s_chat_write_idx];
+        strncpy(msg->role, role, sizeof(msg->role) - 1);
+        msg->role[sizeof(msg->role) - 1] = '\0';
+        strncpy(msg->content, content, sizeof(msg->content) - 1);
+        msg->content[sizeof(msg->content) - 1] = '\0';
+        msg->timestamp = esp_timer_get_time() / 1000000;  // seconds
+        
+        s_chat_write_idx = (s_chat_write_idx + 1) % MAX_CHAT_MESSAGES;
+        if (s_chat_count < MAX_CHAT_MESSAGES) {
+            s_chat_count++;
+        }
+        
+        xSemaphoreGive(s_chat_mutex);
+        ESP_LOGI(TAG, "Chat message added: [%s] %s", role, content);
+    }
+}
+
+void send_text_to_ai(const char* text) {
+    if (!text || strlen(text) == 0) {
+        ESP_LOGW(TAG, "send_text_to_ai: empty text");
+        return;
+    }
+    
+    // Add user message to history
+    add_chat_message("user", text);
+    
+    // Get display and show user message on robot screen
+    auto& board = Board::GetInstance();
+    auto display = board.GetDisplay();
+    auto& app = Application::GetInstance();
+    
+    // Play popup sound to acknowledge message received
+    app.PlaySound(Lang::Sounds::OGG_POPUP);
+    
+    // Display user message on robot screen
+    app.Schedule([display, user_msg = std::string(text)]() {
+        display->SetChatMessage("user", user_msg.c_str());
+        ESP_LOGI(TAG, "Displayed user message on robot: %s", user_msg.c_str());
+    });
+    
+    // Try to send text to AI server using wake word trick
+    // Server will treat text as STT result and process with LLM
+    std::string text_str(text);
+    if (app.SendChatText(text_str)) {
+        ESP_LOGI(TAG, "Text sent to AI server via wake word trick, waiting for TTS response...");
+        // Server response will be handled by OnIncomingJson callback in application.cc
+        // which will update display with TTS text, play audio, and save to chat history
+        return;
+    }
+    
+    // Fall back to demo mode if server is not connected
+    ESP_LOGW(TAG, "Server not connected, using demo mode response");
+    
+    // Generate demo response after 1.5 seconds
+    app.Schedule([display, user_msg = std::string(text)]() {
+        vTaskDelay(pdMS_TO_TICKS(1500));
+        
+        // Convert to lowercase for matching
+        std::string lower_msg = user_msg;
+        for (auto& c : lower_msg) {
+            c = tolower(c);
+        }
+        
+        // Generate demo response based on user input (with length limit)
+        std::string ai_response;
+        
+        // Date/Time related
+        if (lower_msg.find("ngày") != std::string::npos || lower_msg.find("date") != std::string::npos ||
+            lower_msg.find("hôm nay") != std::string::npos || lower_msg.find("nay") != std::string::npos) {
+            // Get current date
+            time_t now;
+            struct tm timeinfo;
+            time(&now);
+            localtime_r(&now, &timeinfo);
+            char date_str[64];
+            strftime(date_str, sizeof(date_str), "%d/%m/%Y", &timeinfo);
+            ai_response = std::string("Hôm nay là ") + date_str;
+        } else if (lower_msg.find("giờ") != std::string::npos || lower_msg.find("time") != std::string::npos ||
+                   lower_msg.find("mấy giờ") != std::string::npos) {
+            // Get current time
+            time_t now;
+            struct tm timeinfo;
+            time(&now);
+            localtime_r(&now, &timeinfo);
+            char time_str[32];
+            strftime(time_str, sizeof(time_str), "%H:%M:%S", &timeinfo);
+            ai_response = std::string("Bây giờ là ") + time_str;
+        }
+        // Greetings
+        else if (lower_msg.find("hi") != std::string::npos || lower_msg.find("hello") != std::string::npos || 
+                 lower_msg.find("xin chào") != std::string::npos || lower_msg.find("chào") != std::string::npos) {
+            ai_response = "Xin chào! Tôi có thể giúp gì?";
+        } 
+        // Name
+        else if (lower_msg.find("name") != std::string::npos || lower_msg.find("tên") != std::string::npos) {
+            ai_response = "Tôi là Xiaozhi Robot!";
+        } 
+        // Help
+        else if (lower_msg.find("help") != std::string::npos || lower_msg.find("giúp") != std::string::npos) {
+            ai_response = "Tôi có thể: trả lời ngày giờ, trò chuyện...";
+        } 
+        // Dance
+        else if (lower_msg.find("dance") != std::string::npos || lower_msg.find("nhảy") != std::string::npos) {
+            ai_response = "OK! Để tôi nhảy cho bạn xem!";
+        }
+        // Weather
+        else if (lower_msg.find("thời tiết") != std::string::npos || lower_msg.find("weather") != std::string::npos) {
+            ai_response = "Tính năng thời tiết cần server AI.";
+        }
+        // Default - Note: Demo mode, connect to AI server for full features
+        else {
+            // Keep response short to avoid buffer issues
+            if (user_msg.length() > 30) {
+                ai_response = "Demo: Kết nối server AI để trò chuyện!";
+            } else {
+                ai_response = "Demo: \"" + user_msg + "\" - Kết nối server để AI trả lời!";
+            }
+        }
+        
+        // Ensure response is not too long (max 100 chars for safety)
+        if (ai_response.length() > 100) {
+            ai_response = ai_response.substr(0, 97) + "...";
+        }
+        
+        ESP_LOGI(TAG, "Demo AI response: %s", ai_response.c_str());
+        
+        // Play notification sound
+        Application::GetInstance().PlaySound(Lang::Sounds::OGG_SUCCESS);
+        
+        // Display AI response on robot screen
+        display->SetChatMessage("assistant", ai_response.c_str());
+        
+        // Add to chat history
+        add_chat_message("assistant", ai_response.c_str());
+        
+        // Update last response for web UI
+        strncpy(s_last_ai_response, ai_response.c_str(), sizeof(s_last_ai_response) - 1);
+        s_last_ai_response[sizeof(s_last_ai_response) - 1] = '\0';
+        
+        ESP_LOGI(TAG, "Demo AI response displayed successfully");
+    });
+}
+
+const char* get_chat_history_json(void) {
+    init_chat_storage();
+    if (xSemaphoreTake(s_chat_mutex, pdMS_TO_TICKS(100))) {
+        s_chat_history_json[0] = '\0';
+        strcat(s_chat_history_json, "[");
+        
+        int start_idx = (s_chat_count < MAX_CHAT_MESSAGES) ? 0 : s_chat_write_idx;
+        for (int i = 0; i < s_chat_count; i++) {
+            int idx = (start_idx + i) % MAX_CHAT_MESSAGES;
+            ChatMessage* msg = &s_chat_history[idx];
+            
+            if (i > 0) strcat(s_chat_history_json, ",");
+            
+            char entry[1536];
+            // Escape quotes in content
+            char escaped_content[MAX_MESSAGE_LENGTH * 2];
+            const char* src = msg->content;
+            char* dst = escaped_content;
+            while (*src && (dst - escaped_content) < (int)sizeof(escaped_content) - 2) {
+                if (*src == '"' || *src == '\\') {
+                    *dst++ = '\\';
+                }
+                *dst++ = *src++;
+            }
+            *dst = '\0';
+            
+            snprintf(entry, sizeof(entry), "{\"role\":\"%s\",\"content\":\"%s\",\"timestamp\":%lld}",
+                     msg->role, escaped_content, msg->timestamp);
+            strcat(s_chat_history_json, entry);
+        }
+        strcat(s_chat_history_json, "]");
+        
+        xSemaphoreGive(s_chat_mutex);
+    } else {
+        strcpy(s_chat_history_json, "[]");
+    }
+    return s_chat_history_json;
+}
+
+const char* get_last_ai_response(void) {
+    return s_last_ai_response;
 }
 
 } // extern "C"

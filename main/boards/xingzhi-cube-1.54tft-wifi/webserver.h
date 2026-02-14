@@ -26,6 +26,12 @@ void get_sleep_config(int* sleep_sec, int* shutdown_sec);
 void set_music_power_save(int enable);
 int get_music_power_save(void);
 
+// Chat AI functions (implemented in board .cc, called from webserver.c)
+void send_text_to_ai(const char* text);
+const char* get_chat_history_json(void);
+const char* get_last_ai_response(void);
+void add_chat_message(const char* role, const char* content);
+
 #ifdef __cplusplus
 }
 #endif

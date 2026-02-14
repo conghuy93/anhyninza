@@ -156,6 +156,10 @@ void robot_control_init(void) {
     ESP_LOGI(TAG, "Robot control initialized - GPIO: LF=%d, LL=%d, RF=%d, RL=%d",
              SERVO_LEFT_FOOT_PIN, SERVO_LEFT_LEG_PIN, 
              SERVO_RIGHT_FOOT_PIN, SERVO_RIGHT_LEG_PIN);
+    
+    // Always go to HOME position after initialization
+    vTaskDelay(pdMS_TO_TICKS(500));  // Small delay to ensure hardware is ready
+    go_home();
 }
 
 void servo_write(servo_channel_t channel, int angle) {

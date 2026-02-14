@@ -78,6 +78,27 @@ void Protocol::SendMcpMessage(const std::string& payload) {
     SendText(message);
 }
 
+void Protocol::SendChatText(const std::string& text) {
+    // Send text input to server as an "stt" message type
+    // Server treats this as if user spoke the text - will process with LLM and return TTS
+    // This allows text chat to work through the voice-based xiaozhi protocol
+    std::string escaped_text;
+    for (char c : text) {
+        if (c == '"') escaped_text += "\\\"";
+        else if (c == '\\') escaped_text += "\\\\";
+        else if (c == '\n') escaped_text += "\\n";
+        else if (c == '\r') escaped_text += "\\r";
+        else escaped_text += c;
+    }
+    
+    std::string message = "{\"session_id\":\"" + session_id_ + "\",\"type\":\"stt\",\"text\":\"" + escaped_text + "\"}";
+    if (!SendText(message)) {
+        ESP_LOGE("Protocol", "Failed to send STT text: %s", text.c_str());
+    } else {
+        ESP_LOGI("Protocol", "Sent STT text to server: %s", text.c_str());
+    }
+}
+
 bool Protocol::IsTimeout() const {
     const int kTimeoutSeconds = 120;
     auto now = std::chrono::steady_clock::now();

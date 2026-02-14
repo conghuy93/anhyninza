@@ -50,6 +50,14 @@ public:
     const std::string& GetCurrentTrack() const { return current_track_; }
     int GetCurrentIndex() const { return current_index_; }
     int GetPlaylistSize() const { return playlist_.size(); }
+    const std::string& GetPlaylistEntry(int index) const { 
+        static std::string empty;
+        if (index >= 0 && index < (int)playlist_.size()) return playlist_[index];
+        return empty;
+    }
+    
+    // Play specific track by index
+    void PlayAt(int index);
     
     // Repeat mode
     void SetRepeatMode(Mp3RepeatMode mode) { repeat_mode_ = mode; }
@@ -75,6 +83,14 @@ private:
     volatile bool pause_requested_ = false;
     volatile bool playback_error_ = false;
     int consecutive_failures_ = 0;
+    
+    // PSRAM task stack (for static task creation)
+    void* psram_task_buffer_ = nullptr;    // StaticTask_t*
+    void* psram_stack_buffer_ = nullptr;   // StackType_t*
+    
+    // Old PSRAM buffers pending cleanup (from self-terminated tasks)
+    void* old_psram_task_buffer_ = nullptr;
+    void* old_psram_stack_buffer_ = nullptr;
 
     // Resources owned by decode task — stored as members so Stop() can clean up
     // if the task is force-killed

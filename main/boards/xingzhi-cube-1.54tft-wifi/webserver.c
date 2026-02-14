@@ -265,6 +265,7 @@ static const char html_content[] =
 "<button class=\"tab\" onclick=\"switchTab(2)\">⚙️ Cài Đặt</button>"
 "<button class=\"tab\" onclick=\"switchTab(3)\">🎵 Nhạc</button>"
 "<button class=\"tab\" onclick=\"switchTab(4)\">📂 SD Card</button>"
+"<button class=\"tab\" onclick=\"switchTab(5)\">💬 Chat AI</button>"
 "</div>"
 "<div id=\"tab1\" class=\"tab-content active\">"
 "<div style=\"background:#1a252f;padding:8px;border-radius:6px;margin:5px 0 10px 0;font-size:11px;line-height:1.5;\">"
@@ -541,6 +542,10 @@ static const char html_content[] =
 "<button class=\"btn\" style=\"background:#2ecc71;width:100%;font-size:0.85em;padding:10px;margin-bottom:6px\" id=\"btnSdUpload\">Upload</button>"
 "<div id=\"sdUploadProgress\" style=\"display:none;background:#2c3e50;border-radius:8px;padding:8px;margin-bottom:8px\">"
 "<div id=\"sdUploadText\" style=\"color:#2ecc71;font-size:0.8em;margin-bottom:4px\">Uploading...</div>"
+"<div id=\"sdUploadTotal\" style=\"color:#7f8c8d;font-size:0.75em;margin-bottom:4px\">Tong: 0 / 0</div>"
+"<div style=\"background:#34495e;border-radius:3px;height:8px;overflow:hidden;margin-bottom:4px\">"
+"<div id=\"sdUploadBarFile\" style=\"background:#3498db;height:100%;width:0%;transition:width 0.2s\"></div>"
+"</div>"
 "<div style=\"background:#34495e;border-radius:3px;height:8px;overflow:hidden\">"
 "<div id=\"sdUploadBar\" style=\"background:#2ecc71;height:100%;width:0%;transition:width 0.3s\"></div>"
 "</div>"
@@ -548,6 +553,19 @@ static const char html_content[] =
 "<hr style=\"border-color:#34495e;margin:8px 0\">"
 "<button class=\"btn\" style=\"background:#c0392b;width:100%;font-size:0.8em;padding:8px\" id=\"btnSdDeleteFile\">Xoa file dang chon</button>"
 "<div id=\"sdDeleteStatus\" style=\"color:#7f8c8d;font-size:0.75em;margin-top:4px\"></div>"
+"</div>"
+"</div>"
+"<div id=\"tab5\" class=\"tab-content\">"
+"<div class=\"calibration\" style=\"max-width:600px;height:calc(100vh - 180px);display:flex;flex-direction:column;margin:8px auto;padding:0;overflow:hidden\">"
+"<h2 style=\"color:#9b59b6;font-size:1em;padding:12px;margin:0;background:#1a252f;border-radius:8px 8px 0 0\">💬 Chat với AI</h2>"
+"<div id=\"chatMessages\" style=\"flex:1;overflow-y:auto;padding:10px;background:#1a252f;display:flex;flex-direction:column;gap:8px\"></div>"
+"<div style=\"padding:10px;background:#2c3e50;border-radius:0 0 8px 8px\">"
+"<div style=\"display:flex;gap:8px\">"
+"<input type=\"text\" id=\"chatInput\" placeholder=\"Nhập tin nhắn...\" style=\"flex:1;padding:10px;border:2px solid #9b59b6;border-radius:6px;background:#1a252f;color:#ecf0f1;font-size:0.9em\" onkeypress=\"if(event.key==='Enter')sendChatMessage()\">"
+"<button class=\"btn\" style=\"background:#9b59b6;padding:10px 20px;font-size:0.9em\" onclick=\"sendChatMessage()\">📤 Gửi</button>"
+"</div>"
+"<div id=\"chatStatus\" style=\"color:#7f8c8d;font-size:0.75em;margin-top:6px;text-align:center\"></div>"
+"</div>"
 "</div>"
 "</div>"
 "<div id=\"tab2\" class=\"tab-content\">"
@@ -1013,7 +1031,7 @@ static const char html_content[] =
 "}).catch(()=>{});}"
 "/* Auto-load SD on tab switch */"
 "const origSwitch=switchTab;"
-"function switchTab(n){document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.getElementById('tab'+n).classList.add('active');document.querySelectorAll('.tab')[n-1].classList.add('active');if(n===3){fetch('/music_server').then(r=>r.json()).then(d=>{if(d.url){document.getElementById('musicServerUrl').value=d.url;}}).catch(()=>{});}if(n===4){sdLoadDir(sdCurrentPath);loadSdRepeatMode();startSdPoll();}else{stopSdPoll();}}"
+"function switchTab(n){document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.getElementById('tab'+n).classList.add('active');document.querySelectorAll('.tab')[n-1].classList.add('active');if(n===3){fetch('/music_server').then(r=>r.json()).then(d=>{if(d.url){document.getElementById('musicServerUrl').value=d.url;}}).catch(()=>{});}if(n===4){sdLoadDir(sdCurrentPath);loadSdRepeatMode();startSdPoll();}else{stopSdPoll();}if(n===5){loadChatHistory();}}"
 "/* SD Upload */"
 "let sdSelectedFile=null;"
 "let sdUploadQueue=[];"
@@ -1120,6 +1138,40 @@ static const char html_content[] =
 "fetch('/music_powersave?on='+on).then(r=>r.json()).then(d=>{"
 "console.log('Power save:',d.power_save);"
 "});};"
+"/* Chat AI Functions */"
+"function addChatBubble(role,text){"
+"const m=document.getElementById('chatMessages');"
+"const d=document.createElement('div');"
+"if(role==='user'){d.style.cssText='background:#9b59b6;align-self:flex-end;max-width:75%;padding:10px;border-radius:12px 12px 2px 12px;color:#fff;word-wrap:break-word';}else if(role==='assistant'){d.style.cssText='background:#3498db;align-self:flex-start;max-width:75%;padding:10px;border-radius:12px 12px 12px 2px;color:#fff;word-wrap:break-word';}else{d.style.cssText='background:#34495e;align-self:center;max-width:85%;padding:8px;border-radius:8px;color:#95a5a6;font-size:0.85em;text-align:center;font-style:italic';}"
+"d.textContent=text;"
+"m.appendChild(d);"
+"m.scrollTop=m.scrollHeight;}"
+"function loadChatHistory(){"
+"fetch('/chat_history').then(r=>r.json()).then(d=>{"
+"const m=document.getElementById('chatMessages');"
+"m.innerHTML='';"
+"if(Array.isArray(d)&&d.length>0){d.forEach(msg=>addChatBubble(msg.role,msg.content));}else{addChatBubble('system','Chưa có lịch sử chat. Hãy bắt đầu trò chuyện!');}"
+"}).catch(e=>{addChatBubble('system','Lỗi tải lịch sử: '+e);});}"
+"function sendChatMessage(){"
+"const inp=document.getElementById('chatInput');"
+"const msg=inp.value.trim();"
+"if(!msg)return;"
+"addChatBubble('user',msg);"
+"inp.value='';"
+"document.getElementById('chatStatus').textContent='Đang gửi...';"
+"fetch('/chat_send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})}).then(r=>r.json()).then(d=>{"
+"document.getElementById('chatStatus').textContent=d.ok?'✓ Đã gửi, đợi phản hồi...':'Lỗi: '+d.error;"
+"if(d.ok){"
+"setTimeout(()=>{"
+"fetch('/chat_history').then(r=>r.json()).then(hist=>{"
+"if(hist.length>0){const last=hist[hist.length-1];if(last.role==='assistant'){addChatBubble('assistant',last.content);}}"
+"document.getElementById('chatStatus').textContent='';"
+"}).catch(e=>{document.getElementById('chatStatus').textContent='Lỗi tải phản hồi';});"
+"},2000);"
+"}else{setTimeout(()=>document.getElementById('chatStatus').textContent='',2000);}"
+"}).catch(e=>{"
+"document.getElementById('chatStatus').textContent='Lỗi kết nối';"
+"setTimeout(()=>document.getElementById('chatStatus').textContent='',2000);});}"
 "</script>"
 "</body></html>";
 
@@ -2578,6 +2630,70 @@ static esp_err_t sd_delete_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// Chat history handler
+static esp_err_t chat_history_handler(httpd_req_t *req) {
+    const char* history_json = get_chat_history_json();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, history_json);
+    return ESP_OK;
+}
+
+// Chat send handler
+static esp_err_t chat_send_handler(httpd_req_t *req) {
+    int total_len = req->content_len;
+    if (total_len <= 0 || total_len > 2048) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Invalid message length\"}");
+        return ESP_OK;
+    }
+    
+    char* buf = (char*)malloc(total_len + 1);
+    if (!buf) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Out of memory\"}");
+        return ESP_OK;
+    }
+    
+    int ret = httpd_req_recv(req, buf, total_len);
+    if (ret <= 0) {
+        free(buf);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Receive failed\"}");
+        return ESP_OK;
+    }
+    buf[ret] = '\0';
+    
+    // Parse JSON to extract message
+    cJSON* root = cJSON_Parse(buf);
+    free(buf);
+    
+    if (!root) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Invalid JSON\"}");
+        return ESP_OK;
+    }
+    
+    cJSON* message = cJSON_GetObjectItem(root, "message");
+    if (!cJSON_IsString(message)) {
+        cJSON_Delete(root);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Missing message field\"}");
+        return ESP_OK;
+    }
+    
+    // Send text to AI
+    send_text_to_ai(message->valuestring);
+    ESP_LOGI(TAG, "Chat message sent: %s", message->valuestring);
+    
+    cJSON_Delete(root);
+    
+    // Response indicating message is being processed
+    // Client should poll /chat_history to get AI response
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true,\"status\":\"processing\"}");
+    return ESP_OK;
+}
+
 // Handler for mode switch (walk/roll) - non-blocking with background task
 static esp_err_t mode_handler(httpd_req_t *req) {
     char mode_str[8];
@@ -2944,6 +3060,20 @@ static const httpd_uri_t uri_sd_delete = {
     .user_ctx = NULL
 };
 
+static const httpd_uri_t uri_chat_send = {
+    .uri = "/chat_send",
+    .method = HTTP_POST,
+    .handler = chat_send_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_chat_history = {
+    .uri = "/chat_history",
+    .method = HTTP_GET,
+    .handler = chat_history_handler,
+    .user_ctx = NULL
+};
+
 httpd_handle_t webserver_start(void) {
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -2951,7 +3081,10 @@ httpd_handle_t webserver_start(void) {
     config.max_uri_handlers = 50;  // Increased for all endpoints + upload/delete
     config.max_resp_headers = 8;
     config.recv_wait_timeout = 60;  // 60s timeout for large file uploads
-    config.stack_size = 12288;  // 12KB stack for upload handler with mkdir
+    config.send_wait_timeout = 60;  // 60s send timeout for large responses
+    config.stack_size = 16384;  // 16KB stack for upload handler with mkdir
+    config.uri_match_fn = httpd_uri_match_wildcard;  // Support wildcards in URI
+    config.max_uri_len = 1024;  // Allow longer URIs for file paths with URL encoding
     
     // Load saved actions from NVS on startup
     for (int i = 0; i < 3; i++) {
@@ -3004,6 +3137,9 @@ httpd_handle_t webserver_start(void) {
         httpd_register_uri_handler(server, &uri_sd_repeat);
         httpd_register_uri_handler(server, &uri_sd_upload);
         httpd_register_uri_handler(server, &uri_sd_delete);
+        // Chat AI handlers
+        httpd_register_uri_handler(server, &uri_chat_send);
+        httpd_register_uri_handler(server, &uri_chat_history);
         
         ESP_LOGI(TAG, "Web server started!");
         return server;
