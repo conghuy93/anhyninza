@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <sys/stat.h>
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "webserver.h"
@@ -13,6 +15,8 @@
 #include <cJSON.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "stream_player_c.h"
+#include "mp3_player_c.h"
 
 static const char *TAG = "webserver";
 
@@ -27,7 +31,8 @@ typedef enum {
     WEB_TASK_RHYTHM_RIGHT = 6,
     WEB_TASK_WALK_PHASE = 7,
     WEB_TASK_WAVE_RIGHT_LEG = 8,
-    WEB_TASK_WAVE_LEFT_LEG = 9
+    WEB_TASK_WAVE_LEFT_LEG = 9,
+    WEB_TASK_SET_MODE = 10
 } web_task_type_t;
 
 typedef struct {
@@ -142,6 +147,17 @@ static void web_action_task(void *pvParameters) {
             break;
         }
             
+        case WEB_TASK_SET_MODE: {
+            int mode = params->param1;
+            ESP_LOGI(TAG, "Background task: SET_MODE %s", mode == 0 ? "WALK" : "ROLL");
+            if (mode == 0) {
+                ninja_set_walk();
+            } else {
+                ninja_set_roll();
+            }
+            break;
+        }
+
         case WEB_TASK_WAVE_RIGHT_LEG: {
             ESP_LOGI(TAG, "🦵 Background task: WAVE RIGHT LEG");
             control_state_t *st = get_control_state();
@@ -209,8 +225,10 @@ static const char html_content[] =
 ".joystick{width:25%;height:25%;background:#3498db;border-radius:50%;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,0.4)}"
 ".buttons{display:grid;grid-template-columns:1fr 1fr;gap:6px;max-width:400px;margin:8px auto;padding:0 10px}"
 ".btn{padding:10px 8px;font-size:0.85em;font-weight:bold;border:none;border-radius:8px;cursor:pointer;color:white;touch-action:manipulation;min-height:40px}"
-".btn-walk{background:#27ae60}"
-".btn-roll{background:#e67e22}"
+".btn-walk{background:#27ae60;transition:all 0.15s}"
+".btn-walk.active{background:#1e8449;box-shadow:0 0 12px #27ae60,inset 0 0 6px rgba(255,255,255,0.2);transform:scale(1.05)}"
+".btn-roll{background:#e67e22;transition:all 0.15s}"
+".btn-roll.active{background:#d35400;box-shadow:0 0 12px #e67e22,inset 0 0 6px rgba(255,255,255,0.2);transform:scale(1.05)}"
 ".btn-left{background:#3498db}"
 ".btn-right{background:#9b59b6}"
 ".values{margin:5px;font-family:monospace;font-size:0.8em;padding:5px;background:#34495e;border-radius:6px;display:inline-block}"
@@ -245,6 +263,8 @@ static const char html_content[] =
 "<div class=\"tabs\">"
 "<button class=\"tab active\" onclick=\"switchTab(1)\">🎮 Điều Khiển</button>"
 "<button class=\"tab\" onclick=\"switchTab(2)\">⚙️ Cài Đặt</button>"
+"<button class=\"tab\" onclick=\"switchTab(3)\">🎵 Nhạc</button>"
+"<button class=\"tab\" onclick=\"switchTab(4)\">📂 SD Card</button>"
 "</div>"
 "<div id=\"tab1\" class=\"tab-content active\">"
 "<div style=\"background:#1a252f;padding:8px;border-radius:6px;margin:5px 0 10px 0;font-size:11px;line-height:1.5;\">"
@@ -285,7 +305,7 @@ static const char html_content[] =
 "<div style=\"font-size:0.6em;color:#7f8c8d\">0=Không giới hạn (giữ nút) | 0.5s-30s = Tự động dừng sau thời gian</div>"
 "</div>"
 "<div class=\"buttons\">"
-"<button class=\"btn btn-walk\" id=\"btnY\">🚶 WALK</button>"
+"<button class=\"btn btn-walk active\" id=\"btnY\">🚶 WALK</button>"
 "<button class=\"btn btn-roll\" id=\"btnX\">⚙️ ROLL</button>"
 "<button class=\"btn btn-left\" id=\"btnA\">👈 L.Arm</button>"
 "<button class=\"btn btn-right\" id=\"btnB\">👉 R.Arm</button>"
@@ -434,6 +454,7 @@ static const char html_content[] =
 "<button class=\"btn led-mode-btn\" data-mode=\"3\" style=\"background:#27ae60;font-size:0.65em;padding:4px 8px\">💨 Breathing</button>"
 "<button class=\"btn led-mode-btn\" data-mode=\"4\" style=\"background:#f39c12;font-size:0.65em;padding:4px 8px\">🏃 Chase</button>"
 "<button class=\"btn led-mode-btn\" data-mode=\"5\" style=\"background:#9b59b6;font-size:0.65em;padding:4px 8px\">⚡ Blink</button>"
+"<button class=\"btn led-mode-btn\" data-mode=\"11\" style=\"background:linear-gradient(135deg,#e74c3c,#f39c12,#27ae60,#3498db);font-size:0.65em;padding:4px 8px\">🎵 Music</button>"
 "</div>"
 "</div>"
 "<div class=\"buttons\" style=\"margin-top:8px\">"
@@ -448,6 +469,85 @@ static const char html_content[] =
 "<button class=\"btn\" style=\"background:#1abc9c;font-size:0.7em;padding:5px\" data-color=\"#00ffff\">🩵</button>"
 "<button class=\"btn\" style=\"background:#ecf0f1;color:#2c3e50;font-size:0.7em;padding:5px\" data-color=\"#ffffff\">⚪</button>"
 "</div>"
+"</div>"
+"</div>"
+"<div id=\"tab3\" class=\"tab-content\">"
+"<div class=\"calibration\" style=\"max-width:420px;margin:8px auto;background:#1a2530;border:2px solid #e91e63;padding:12px\">"
+"<h2 style=\"color:#e91e63;font-size:1em;margin-bottom:10px\">🎵 Stream Nhạc Online</h2>"
+"<div style=\"display:flex;gap:6px;margin-bottom:10px\">"
+"<input type=\"text\" id=\"musicSearch\" placeholder=\"Tên bài hát...\" style=\"flex:1;padding:10px;border:2px solid #3498db;border-radius:8px;background:#2c3e50;color:#ecf0f1;font-size:0.9em\">"
+"</div>"
+"<div style=\"display:flex;gap:6px;margin-bottom:10px\">"
+"<input type=\"text\" id=\"musicArtist\" placeholder=\"Ca sĩ (tuỳ chọn)...\" style=\"flex:1;padding:8px;border:2px solid #7f8c8d;border-radius:8px;background:#2c3e50;color:#ecf0f1;font-size:0.85em\">"
+"</div>"
+"<div style=\"display:flex;gap:6px;margin-bottom:10px\">"
+"<button class=\"btn\" style=\"background:#e91e63;flex:1;font-size:0.9em;padding:12px\" id=\"btnMusicPlay\">🔍 Tìm &amp; Phát</button>"
+"<button class=\"btn\" style=\"background:#e74c3c;flex:1;font-size:0.9em;padding:12px\" id=\"btnMusicStop\">⏹ Dừng</button>"
+"</div>"
+"<div id=\"musicInfo\" style=\"background:#2c3e50;border-radius:8px;padding:10px;margin-bottom:10px;min-height:60px\">"
+"<div id=\"musicTitle\" style=\"color:#e91e63;font-size:0.95em;font-weight:bold;margin-bottom:4px\">Chưa phát nhạc</div>"
+"<div id=\"musicArtistDisp\" style=\"color:#bdc3c7;font-size:0.8em;margin-bottom:4px\"></div>"
+"<div id=\"musicStatus\" style=\"color:#3498db;font-size:0.75em\"></div>"
+"<div id=\"musicTime\" style=\"color:#7f8c8d;font-size:0.7em;margin-top:4px\"></div>"
+"</div>"
+"<div id=\"lyricsBox\" style=\"background:#1a252f;border:1px solid #3498db;border-radius:8px;padding:10px;min-height:80px;max-height:200px;overflow-y:auto;text-align:center\">"
+"<div id=\"lyricPrev\" style=\"color:#546e7a;font-size:0.75em;margin-bottom:6px\"></div>"
+"<div id=\"lyricCurrent\" style=\"color:#e91e63;font-size:1em;font-weight:bold;margin-bottom:6px;text-shadow:0 0 10px rgba(233,30,99,0.3)\">♪ Lời bài hát ♪</div>"
+"<div id=\"lyricNext\" style=\"color:#546e7a;font-size:0.75em\"></div>"
+"</div>"
+"<div style=\"margin-top:10px;background:#2c3e50;border-radius:8px;padding:8px\">"
+"<label style=\"color:#7f8c8d;font-size:0.7em;display:block;margin-bottom:4px\">🌐 Server URL:</label>"
+"<div style=\"display:flex;gap:6px\">"
+"<input type=\"text\" id=\"musicServerUrl\" placeholder=\"http://server:port\" style=\"flex:1;padding:6px;border:1px solid #34495e;border-radius:6px;background:#1a252f;color:#bdc3c7;font-size:0.7em\">"
+"<button class=\"btn\" style=\"background:#34495e;font-size:0.7em;padding:6px 10px\" id=\"btnSetServer\">💾</button>"
+"</div>"
+"</div>"
+"</div>"
+"</div>"
+"<div id=\"tab4\" class=\"tab-content\">"
+"<div class=\"calibration\" style=\"max-width:420px;margin:8px auto;background:#1a2530;border:2px solid #ff9800;padding:12px\">"
+"<h2 style=\"color:#ff9800;font-size:1em;margin-bottom:10px\">📂 Nhạc Thẻ Nhớ SD</h2>"
+"<div id=\"sdStatus\" style=\"color:#7f8c8d;font-size:0.8em;margin-bottom:8px\">Đang tải...</div>"
+"<div id=\"sdBrowser\" style=\"background:#2c3e50;border-radius:8px;padding:8px;margin-bottom:10px;max-height:300px;overflow-y:auto\">"
+"<div id=\"sdPath\" style=\"color:#ff9800;font-size:0.75em;margin-bottom:6px;font-family:monospace\">/sdcard</div>"
+"<div id=\"sdFileList\" style=\"font-size:0.85em\"></div>"
+"</div>"
+"<div style=\"display:flex;gap:6px;margin-bottom:8px\">"
+"<button class=\"btn\" style=\"background:#ff9800;flex:1;font-size:0.85em;padding:10px\" id=\"btnSdPlayAll\">▶️ Phát Tất Cả</button>"
+"<button class=\"btn\" style=\"background:#e74c3c;flex:1;font-size:0.85em;padding:10px\" id=\"btnSdStop\">⏹ Dừng</button>"
+"</div>"
+"<div style=\"display:flex;gap:6px;margin-bottom:10px\">"
+"<button class=\"btn\" style=\"background:#7f8c8d;flex:1;font-size:0.8em;padding:8px\" id=\"btnSdPrev\">⏮ Trước</button>"
+"<button class=\"btn\" style=\"background:#3498db;flex:1;font-size:0.8em;padding:8px\" id=\"btnSdPause\">⏸ Tạm Dừng</button>"
+"<button class=\"btn\" style=\"background:#7f8c8d;flex:1;font-size:0.8em;padding:8px\" id=\"btnSdNext\">Tiếp ⏭</button>"
+"</div>"
+"<div style=\"display:flex;gap:8px;margin-bottom:10px;align-items:center\">"
+"<span style=\"color:#7f8c8d;font-size:0.8em\">🔁 Lặp lại:</span>"
+"<select id=\"sdRepeatMode\" style=\"flex:1;padding:6px;border:2px solid #9b59b6;border-radius:6px;background:#2c3e50;color:#ecf0f1;font-size:0.8em\">"
+"<option value=\"0\">Không lặp</option>"
+"<option value=\"1\">Lặp 1 bài</option>"
+"<option value=\"2\" selected>Lặp tất cả</option>"
+"</select>"
+"</div>"
+"<div id=\"sdNowPlaying\" style=\"background:#2c3e50;border-radius:8px;padding:10px;min-height:40px\">"
+"<div id=\"sdTrackName\" style=\"color:#ff9800;font-size:0.9em;font-weight:bold\">Chưa phát</div>"
+"<div id=\"sdTrackInfo\" style=\"color:#7f8c8d;font-size:0.75em;margin-top:4px\"></div>"
+"</div>"
+"<hr style=\"border-color:#34495e;margin:12px 0\">"
+"<h3 style=\"color:#2ecc71;font-size:0.9em;margin-bottom:8px\">Upload MP3</h3>"
+"<div style=\"display:flex;gap:6px;margin-bottom:8px;align-items:center\">"
+"<input type=\"file\" id=\"sdFileInput\" accept=\".mp3,.wav,.ogg,.flac\" multiple style=\"flex:1;font-size:0.75em;color:#ecf0f1;background:#2c3e50;border:1px solid #7f8c8d;border-radius:4px;padding:6px\">"
+"</div>"
+"<button class=\"btn\" style=\"background:#2ecc71;width:100%;font-size:0.85em;padding:10px;margin-bottom:6px\" id=\"btnSdUpload\">Upload</button>"
+"<div id=\"sdUploadProgress\" style=\"display:none;background:#2c3e50;border-radius:8px;padding:8px;margin-bottom:8px\">"
+"<div id=\"sdUploadText\" style=\"color:#2ecc71;font-size:0.8em;margin-bottom:4px\">Uploading...</div>"
+"<div style=\"background:#34495e;border-radius:3px;height:8px;overflow:hidden\">"
+"<div id=\"sdUploadBar\" style=\"background:#2ecc71;height:100%;width:0%;transition:width 0.3s\"></div>"
+"</div>"
+"</div>"
+"<hr style=\"border-color:#34495e;margin:8px 0\">"
+"<button class=\"btn\" style=\"background:#c0392b;width:100%;font-size:0.8em;padding:8px\" id=\"btnSdDeleteFile\">Xoa file dang chon</button>"
+"<div id=\"sdDeleteStatus\" style=\"color:#7f8c8d;font-size:0.75em;margin-top:4px\"></div>"
 "</div>"
 "</div>"
 "<div id=\"tab2\" class=\"tab-content\">"
@@ -590,6 +690,45 @@ static const char html_content[] =
 "<div class=\"cal-row\"><input type=\"range\" id=\"trl\" min=\"1\" max=\"20\" value=\"5\" title=\"RL Transform Speed (1-20ms)\"><span class=\"cal-value\" id=\"trlDisp\">5</span></div>"
 "</div>"
 "</div>"
+"<div class=\"cal-section\">"
+"<h3>💤 Hẹn giờ ngủ (Sleep Timer)</h3>"
+"<div class=\"cal-item\">"
+"<label title=\"Thời gian không hoạt động trước khi màn hình tối (Sleep idle dimming)\">😴 Sleep (tắt màn hình)</label>"
+"<select id=\"sleepSec\" style=\"flex:1;padding:6px;border:2px solid #3498db;border-radius:6px;background:#2c3e50;color:#ecf0f1;font-size:0.85em\">"
+"<option value=\"-1\">Không bao giờ</option>"
+"<option value=\"30\">30 giây</option>"
+"<option value=\"60\">1 phút</option>"
+"<option value=\"120\">2 phút</option>"
+"<option value=\"180\">3 phút</option>"
+"<option value=\"300\">5 phút</option>"
+"<option value=\"600\">10 phút</option>"
+"</select>"
+"</div>"
+"<div class=\"cal-item\">"
+"<label title=\"Thời gian không hoạt động trước khi vào chế độ ngủ sâu tiết kiệm pin (Deep sleep shutdown)\">🔋 Deep Sleep (tắt nguồn)</label>"
+"<select id=\"shutdownSec\" style=\"flex:1;padding:6px;border:2px solid #e74c3c;border-radius:6px;background:#2c3e50;color:#ecf0f1;font-size:0.85em\">"
+"<option value=\"-1\">Không bao giờ</option>"
+"<option value=\"60\">1 phút</option>"
+"<option value=\"120\">2 phút</option>"
+"<option value=\"180\">3 phút</option>"
+"<option value=\"300\">5 phút</option>"
+"<option value=\"600\">10 phút</option>"
+"<option value=\"900\">15 phút</option>"
+"<option value=\"1800\">30 phút</option>"
+"<option value=\"3600\">1 giờ</option>"
+"</select>"
+"</div>"
+"<button class=\"btn-apply\" id=\"btnSaveSleep\" style=\"background:#9b59b6;margin-top:6px\">💾 Lưu Sleep Timer</button>"
+"<div id=\"sleepStatus\" style=\"color:#7f8c8d;font-size:0.75em;margin-top:4px;text-align:center\"></div>"
+"</div>"
+"<div class=\"cal-section\">"
+"<h3>⚡ Tiết kiệm pin khi nghe nhạc</h3>"
+"<div style=\"display:flex;align-items:center;gap:10px;padding:8px;background:#2c3e50;border-radius:8px\">"
+"<label style=\"color:#ecf0f1;font-size:0.85em;flex:1\">🔋 Tắt LED &amp; Giảm sáng màn hình</label>"
+"<label class=\"switch\"><input type=\"checkbox\" id=\"musicPowerSave\"><span class=\"slider round\"></span></label>"
+"</div>"
+"<div style=\"color:#7f8c8d;font-size:0.7em;margin-top:4px\">Bật để tắt LED và giảm sáng màn hình khi đang phát nhạc, tiết kiệm pin đáng kể.</div>"
+"</div>"
 "<div style=\"display:flex;gap:6px;\">"
 "<button class=\"btn-apply\" id=\"btnApply\" style=\"flex:1;\">✅ Apply</button>"
 "<button class=\"btn-apply\" id=\"btnReset\" style=\"flex:1;background:#e74c3c;\">🔄 Reset</button>"
@@ -597,7 +736,7 @@ static const char html_content[] =
 "</div>"
 "</div>"
 "<script>"
-"function switchTab(n){document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.getElementById('tab'+n).classList.add('active');document.querySelectorAll('.tab')[n-1].classList.add('active');}"
+"/* switchTab defined below after SD Card section */"
 "let jx=0,jy=0,bA=0,bB=0,bX=0,bY=0;"
 "const js=document.getElementById('joystick'),jz=document.getElementById('joystickZone');"
 "let drag=false;const md=70;"
@@ -634,8 +773,8 @@ static const char html_content[] =
 "document.addEventListener('touchmove',uj);"
 "document.addEventListener('mouseup',rj);"
 "document.addEventListener('touchend',rj);"
-"document.getElementById('btnY').onclick=()=>{bY=1;setTimeout(()=>bY=0,100);sendControl();};"
-"document.getElementById('btnX').onclick=()=>{bX=1;setTimeout(()=>bX=0,100);sendControl();};"
+"document.getElementById('btnY').onclick=()=>{fb('btnY');fetch('/mode?m=walk').then(r=>r.json()).then(d=>{document.getElementById('btnY').classList.add('active');document.getElementById('btnX').classList.remove('active');});};"
+"document.getElementById('btnX').onclick=()=>{fb('btnX');fetch('/mode?m=roll').then(r=>r.json()).then(d=>{document.getElementById('btnX').classList.add('active');document.getElementById('btnY').classList.remove('active');});};"
 "document.getElementById('btnA').onmousedown=()=>{bA=1;sendControl();};"
 "document.getElementById('btnA').onmouseup=()=>{bA=0;sendControl();};"
 "document.getElementById('btnB').onmousedown=()=>{bB=1;sendControl();};"
@@ -802,6 +941,185 @@ static const char html_content[] =
 "if(activeBtn)activeBtn.classList.add('active');"
 "}"
 "});"
+"/* Music Player */"
+"let musicPollTimer=null;"
+"document.getElementById('btnMusicPlay').onclick=()=>{"
+"const song=document.getElementById('musicSearch').value.trim();"
+"if(!song){document.getElementById('musicTitle').textContent='Vui long nhap ten bai hat!';return;}"
+"const artist=document.getElementById('musicArtist').value.trim();"
+"document.getElementById('musicTitle').textContent='Dang tim: '+song+'...';"
+"document.getElementById('musicStatus').textContent='';"
+"document.getElementById('lyricCurrent').textContent='Dang tai...';"
+"document.getElementById('btnMusicPlay').classList.add('running');"
+"fetch('/music_search?song='+encodeURIComponent(song)+'&artist='+encodeURIComponent(artist))"
+".then(r=>r.json()).then(d=>{"
+"document.getElementById('btnMusicPlay').classList.remove('running');"
+"if(d.status==='ok'){startMusicPoll();}else{document.getElementById('musicTitle').textContent=d.msg||'Loi tim bai hat!';}"
+"}).catch(()=>{document.getElementById('btnMusicPlay').classList.remove('running');document.getElementById('musicTitle').textContent='Loi ket noi!';});"
+"};"
+"document.getElementById('btnMusicStop').onclick=()=>{fetch('/music_stop');stopMusicPoll();document.getElementById('musicTitle').textContent='Da dung';document.getElementById('musicStatus').textContent='';document.getElementById('lyricCurrent').textContent='';document.getElementById('lyricPrev').textContent='';document.getElementById('lyricNext').textContent='';document.getElementById('musicTime').textContent='';};"
+"document.getElementById('btnSetServer').onclick=()=>{const url=document.getElementById('musicServerUrl').value.trim();if(url){const btn=document.getElementById('btnSetServer');btn.textContent='...';fetch('/music_server?url='+encodeURIComponent(url)).then(r=>r.json()).then(d=>{btn.textContent=d.status==='ok'?'✅':'❌';setTimeout(()=>{btn.textContent='💾';},1500);}).catch(()=>{btn.textContent='❌';setTimeout(()=>{btn.textContent='💾';},1500);});}};"
+"document.getElementById('musicSearch').addEventListener('keydown',(e)=>{if(e.key==='Enter'){document.getElementById('btnMusicPlay').click();}});"
+"function startMusicPoll(){stopMusicPoll();musicPollTimer=setInterval(pollMusicStatus,800);}"
+"function stopMusicPoll(){if(musicPollTimer){clearInterval(musicPollTimer);musicPollTimer=null;}}"
+"function pollMusicStatus(){"
+"fetch('/music_status').then(r=>r.json()).then(d=>{"
+"document.getElementById('musicTitle').textContent=d.title||'---';"
+"document.getElementById('musicArtistDisp').textContent=d.artist||'';"
+"document.getElementById('musicStatus').textContent=d.status||'';"
+"const mins=Math.floor(d.time_ms/60000);const secs=Math.floor((d.time_ms%60000)/1000);"
+"document.getElementById('musicTime').textContent=mins+':'+String(secs).padStart(2,'0');"
+"if(d.lyric){document.getElementById('lyricCurrent').textContent=d.lyric;}"
+"if(d.lyric_prev){document.getElementById('lyricPrev').textContent=d.lyric_prev;}else{document.getElementById('lyricPrev').textContent='';}"
+"if(d.lyric_next){document.getElementById('lyricNext').textContent=d.lyric_next;}else{document.getElementById('lyricNext').textContent='';}"
+"if(d.state===0){stopMusicPoll();document.getElementById('musicStatus').textContent='Ket thuc';}"
+"}).catch(()=>{});}"
+"/* SD Card Player */"
+"let sdCurrentPath='/sdcard';"
+"let sdPollTimer=null;"
+"function sdLoadDir(path){"
+"sdCurrentPath=path;"
+"document.getElementById('sdPath').textContent=path;"
+"document.getElementById('sdFileList').innerHTML='<div style=\"color:#7f8c8d\">Đang tải...</div>';"
+"fetch('/sd_list?path='+encodeURIComponent(path)).then(r=>r.json()).then(d=>{"
+"if(!d.mounted){document.getElementById('sdStatus').textContent='❌ Thẻ nhớ không có';document.getElementById('sdFileList').innerHTML='';return;}"
+"document.getElementById('sdStatus').textContent='✅ SD: '+d.total+' file MP3';"
+"let html='';"
+"if(path!=='/sdcard'){html+='<div style=\"padding:6px;cursor:pointer;color:#ff9800;border-bottom:1px solid #34495e\" onclick=\"sdLoadDir(\\''+path.substring(0,path.lastIndexOf('/'))+'\\')\">&#128193; .. (Quay lại)</div>';}"
+"d.files.forEach(f=>{"
+"if(f.dir){html+='<div style=\"padding:6px;cursor:pointer;color:#3498db;border-bottom:1px solid #34495e\" onclick=\"sdLoadDir(\\''+f.path+'\\')\">&#128193; '+f.name+'</div>';}"
+"else{const sz=f.size>1048576?(f.size/1048576).toFixed(1)+'MB':(f.size/1024).toFixed(0)+'KB';"
+"html+='<div style=\"padding:6px;cursor:pointer;color:#ecf0f1;border-bottom:1px solid #34495e;display:flex;justify-content:space-between;align-items:center\" onclick=\"sdPlayFile(\\''+f.path.replace(/'/g,\"\\\\'\")+'\\')\"><span>&#9835; '+f.name+'</span><span style=\"color:#7f8c8d;font-size:0.7em\">'+sz+'</span></div>';}"
+"});"
+"if(d.files.length===0)html='<div style=\"color:#7f8c8d;padding:10px;text-align:center\">Thư mục trống</div>';"
+"document.getElementById('sdFileList').innerHTML=html;"
+"}).catch(()=>{document.getElementById('sdFileList').innerHTML='<div style=\"color:#e74c3c\">Lỗi kết nối</div>';});}"
+"function sdPlayFile(path){sdSelectedFile=path;fetch('/sd_play?path='+encodeURIComponent(path)).then(r=>r.json()).then(d=>{if(d.status==='ok'){startSdPoll();}});}"
+"document.getElementById('btnSdPlayAll').onclick=()=>{fetch('/sd_play_all?path='+encodeURIComponent(sdCurrentPath)).then(r=>r.json()).then(d=>{document.getElementById('sdTrackName').textContent='Đang phát...';startSdPoll();});};"
+"document.getElementById('btnSdStop').onclick=()=>{fetch('/sd_stop');stopSdPoll();document.getElementById('sdTrackName').textContent='Đã dừng';document.getElementById('sdTrackInfo').textContent='';};"
+"document.getElementById('btnSdPrev').onclick=()=>{fetch('/sd_prev');startSdPoll();};"
+"document.getElementById('btnSdNext').onclick=()=>{fetch('/sd_next');startSdPoll();};"
+"document.getElementById('btnSdPause').onclick=()=>{fetch('/sd_pause').then(r=>r.json()).then(d=>{document.getElementById('btnSdPause').textContent=d.paused?'▶ Tiếp tục':'⏸ Tạm Dừng';});};"
+"document.getElementById('sdRepeatMode').onchange=(e)=>{fetch('/sd_repeat?mode='+e.target.value);};"
+"function loadSdRepeatMode(){fetch('/sd_repeat').then(r=>r.json()).then(d=>{document.getElementById('sdRepeatMode').value=d.mode;}).catch(()=>{});}"
+"function startSdPoll(){stopSdPoll();sdPollTimer=setInterval(pollSdStatus,1000);}"
+"function stopSdPoll(){if(sdPollTimer){clearInterval(sdPollTimer);sdPollTimer=null;}}"
+"function pollSdStatus(){"
+"fetch('/sd_status').then(r=>r.json()).then(d=>{"
+"if(d.track){const nm=d.track.split('/').pop();document.getElementById('sdTrackName').textContent=nm;}"
+"document.getElementById('sdTrackInfo').textContent='Bài '+(d.index+1)+'/'+d.total+' | '+(d.state===1?'▶ Đang phát':d.state===2?'⏸ Tạm dừng':'⏹ Dừng');"
+"document.getElementById('btnSdPause').textContent=d.state===2?'▶ Tiếp tục':'⏸ Tạm Dừng';"
+"if(d.state===0){stopSdPoll();}"
+"}).catch(()=>{});}"
+"/* Auto-load SD on tab switch */"
+"const origSwitch=switchTab;"
+"function switchTab(n){document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.getElementById('tab'+n).classList.add('active');document.querySelectorAll('.tab')[n-1].classList.add('active');if(n===3){fetch('/music_server').then(r=>r.json()).then(d=>{if(d.url){document.getElementById('musicServerUrl').value=d.url;}}).catch(()=>{});}if(n===4){sdLoadDir(sdCurrentPath);loadSdRepeatMode();startSdPoll();}else{stopSdPoll();}}"
+"/* SD Upload */"
+"let sdSelectedFile=null;"
+"let sdUploadQueue=[];"
+"function fmtSz(b){return b>1048576?(b/1048576).toFixed(1)+' MB':b>1024?(b/1024).toFixed(0)+' KB':b+' B';}"
+"function sdUpdateFileList(){"
+"const fl=document.getElementById('sdFileList');"
+"const items=document.getElementById('sdFileItems');"
+"const cnt=document.getElementById('sdFileCount');"
+"if(!sdUploadQueue.length){fl.style.display='none';return;}"
+"fl.style.display='block';"
+"let total=0;sdUploadQueue.forEach(f=>total+=f.size);"
+"cnt.textContent=sdUploadQueue.length+' file - '+fmtSz(total);"
+"let h='';sdUploadQueue.forEach((f,i)=>{"
+"h+='<div style=\"display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid #34495e;font-size:0.75em\">';"
+"h+='<span style=\"color:#ecf0f1;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap\">&#9835; '+f.name+'</span>';"
+"h+='<span style=\"color:#7f8c8d;margin:0 6px;white-space:nowrap\">'+fmtSz(f.size)+'</span>';"
+"h+='<span onclick=\"sdRemoveFile('+i+')\" style=\"color:#e74c3c;cursor:pointer;font-size:1.1em\" title=\"Xoa\">&#10005;</span></div>';"
+"});"
+"items.innerHTML=h;"
+"}"
+"function sdRemoveFile(i){sdUploadQueue.splice(i,1);sdUpdateFileList();}"
+"function sdClearFiles(){sdUploadQueue=[];sdUpdateFileList();document.getElementById('sdFileInput').value='';}"
+"function sdAddFiles(fileList){"
+"for(let i=0;i<fileList.length;i++){"
+"const f=fileList[i];"
+"if(!sdUploadQueue.some(q=>q.name===f.name&&q.size===f.size)){sdUploadQueue.push(f);}"
+"}"
+"sdUpdateFileList();"
+"}"
+"document.getElementById('sdFileInput').onchange=function(){sdAddFiles(this.files);};"
+"const dz=document.getElementById('sdDropZone');"
+"dz.ondragover=(e)=>{e.preventDefault();dz.style.borderColor='#2ecc71';dz.style.background='rgba(46,204,113,0.08)';};"
+"dz.ondragleave=()=>{dz.style.borderColor='#7f8c8d';dz.style.background='';};"
+"dz.ondrop=(e)=>{e.preventDefault();dz.style.borderColor='#7f8c8d';dz.style.background='';if(e.dataTransfer.files.length)sdAddFiles(e.dataTransfer.files);};"
+"function sdUploadFile(file,dest,barFile){"
+"return new Promise((resolve,reject)=>{"
+"const xhr=new XMLHttpRequest();"
+"xhr.upload.onprogress=(e)=>{if(e.lengthComputable){const pct=Math.round(e.loaded*100/e.total);barFile.style.width=pct+'%';}};"
+"xhr.onload=()=>{try{const d=JSON.parse(xhr.responseText);if(d.status==='ok'){resolve(d);}else{reject(d.error||'Server error');}}catch(ex){reject('Parse error');}};"
+"xhr.onerror=()=>{reject('Loi ket noi');};"
+"xhr.ontimeout=()=>{reject('Timeout');};"
+"xhr.timeout=300000;"
+"xhr.open('POST','/sd_upload?path='+encodeURIComponent(dest));"
+"xhr.setRequestHeader('Content-Type','application/octet-stream');"
+"xhr.send(file);"
+"});"
+"}"
+"document.getElementById('btnSdUpload').onclick=async()=>{"
+"if(!sdUploadQueue.length){alert('Chon file truoc!');return;}"
+"const files=[...sdUploadQueue];"
+"const prog=document.getElementById('sdUploadProgress');"
+"const barAll=document.getElementById('sdUploadBar');"
+"const barFile=document.getElementById('sdUploadBarFile');"
+"const txt=document.getElementById('sdUploadText');"
+"const ttl=document.getElementById('sdUploadTotal');"
+"prog.style.display='block';"
+"stopSdPoll();"
+"let ok=0;let totalBytes=0;let doneBytes=0;"
+"files.forEach(f=>totalBytes+=f.size);"
+"for(let i=0;i<files.length;i++){"
+"const f=files[i];"
+"const dest=sdCurrentPath+'/'+f.name;"
+"txt.textContent='('+(i+1)+'/'+files.length+') '+f.name;"
+"ttl.textContent='Tong: '+fmtSz(doneBytes)+' / '+fmtSz(totalBytes);"
+"barFile.style.width='0%';"
+"barAll.style.width=Math.round(doneBytes*100/totalBytes)+'%';"
+"try{await sdUploadFile(f,dest,barFile);ok++;doneBytes+=f.size;}catch(e){txt.textContent='Loi: '+f.name+' - '+e;break;}"
+"}"
+"barAll.style.width='100%';barFile.style.width='100%';"
+"ttl.textContent='Tong: '+fmtSz(totalBytes);"
+"if(ok===files.length){txt.textContent='Thanh cong! '+ok+' file ('+fmtSz(totalBytes)+')';}"
+"sdUploadQueue=[];sdUpdateFileList();"
+"setTimeout(()=>{prog.style.display='none';barAll.style.width='0%';barFile.style.width='0%';},4000);"
+"sdLoadDir(sdCurrentPath);"
+"startSdPoll();"
+"document.getElementById('sdFileInput').value='';"
+"};"
+"/* SD Delete */"
+"document.getElementById('btnSdDeleteFile').onclick=()=>{"
+"if(!sdSelectedFile){document.getElementById('sdDeleteStatus').textContent='Chua chon file!';return;}"
+"if(!confirm('Xoa: '+sdSelectedFile+'?'))return;"
+"fetch('/sd_delete?path='+encodeURIComponent(sdSelectedFile)).then(r=>r.json()).then(d=>{"
+"document.getElementById('sdDeleteStatus').textContent=d.status==='ok'?'Da xoa!':'Loi: '+d.error;"
+"if(d.status==='ok'){sdSelectedFile=null;sdLoadDir(sdCurrentPath);}"
+"});};"
+"/* Sleep Timer & Power Save */"
+"function loadSleepConfig(){"
+"fetch('/get_sleep_config').then(r=>r.json()).then(d=>{"
+"document.getElementById('sleepSec').value=d.sleep;"
+"document.getElementById('shutdownSec').value=d.shutdown;"
+"document.getElementById('musicPowerSave').checked=d.power_save==1;"
+"}).catch(()=>{});}"
+"loadSleepConfig();"
+"document.getElementById('btnSaveSleep').onclick=()=>{"
+"const ss=document.getElementById('sleepSec').value;"
+"const sd=document.getElementById('shutdownSec').value;"
+"fetch('/sleep_config?sleep='+ss+'&shutdown='+sd).then(r=>r.json()).then(d=>{"
+"if(d.ok){document.getElementById('sleepStatus').textContent='Đã lưu! Sleep='+d.sleep+'s, Shutdown='+d.shutdown+'s';document.getElementById('sleepStatus').style.color='#2ecc71';}"
+"else{document.getElementById('sleepStatus').textContent='Lỗi!';document.getElementById('sleepStatus').style.color='#e74c3c';}"
+"setTimeout(()=>{document.getElementById('sleepStatus').textContent='';},3000);"
+"});};"
+"document.getElementById('musicPowerSave').onchange=()=>{"
+"const on=document.getElementById('musicPowerSave').checked?1:0;"
+"fetch('/music_powersave?on='+on).then(r=>r.json()).then(d=>{"
+"console.log('Power save:',d.power_save);"
+"});};"
 "</script>"
 "</body></html>";
 
@@ -821,6 +1139,29 @@ static esp_err_t get_query_param(httpd_req_t *req, const char *key, char *value,
         free(buf);
     }
     return ESP_FAIL;
+}
+
+// URL decode %XX sequences in-place
+static void url_decode_in_place(char *str) {
+    char *src = str, *dst = str;
+    while (*src) {
+        if (*src == '%' && src[1] && src[2]) {
+            char hex[3] = { src[1], src[2], 0 };
+            char *end;
+            long val = strtol(hex, &end, 16);
+            if (end == hex + 2) {
+                *dst++ = (char)val;
+                src += 3;
+                continue;
+            }
+        } else if (*src == '+') {
+            *dst++ = ' ';
+            src++;
+            continue;
+        }
+        *dst++ = *src++;
+    }
+    *dst = '\0';
 }
 
 static int get_query_param_int(httpd_req_t *req, const char *key, int default_val) {
@@ -1056,6 +1397,64 @@ static esp_err_t get_led_handler(httpd_req_t *req) {
              "{\"r\":%d,\"g\":%d,\"b\":%d,\"br\":%d,\"mode\":%d,\"speed\":%d}",
              led->r, led->g, led->b, led->brightness, led->mode, led->speed);
     
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json);
+    return ESP_OK;
+}
+
+// Handler for setting sleep config
+static esp_err_t sleep_config_handler(httpd_req_t *req) {
+    char val[16];
+    int sleep_sec = -2, shutdown_sec = -2;  // -2 = not provided
+    
+    if (get_query_param(req, "sleep", val, sizeof(val)) == ESP_OK) {
+        sleep_sec = atoi(val);
+    }
+    if (get_query_param(req, "shutdown", val, sizeof(val)) == ESP_OK) {
+        shutdown_sec = atoi(val);
+    }
+    
+    if (sleep_sec != -2 || shutdown_sec != -2) {
+        // Get current values first
+        int cur_sleep, cur_shutdown;
+        get_sleep_config(&cur_sleep, &cur_shutdown);
+        if (sleep_sec != -2) cur_sleep = sleep_sec;
+        if (shutdown_sec != -2) cur_shutdown = shutdown_sec;
+        set_sleep_config(cur_sleep, cur_shutdown);
+        
+        char json[96];
+        snprintf(json, sizeof(json), "{\"ok\":1,\"sleep\":%d,\"shutdown\":%d}", cur_sleep, cur_shutdown);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, json);
+    } else {
+        httpd_resp_sendstr(req, "{\"ok\":0,\"err\":\"no params\"}");
+    }
+    return ESP_OK;
+}
+
+// Handler for getting sleep config
+static esp_err_t get_sleep_config_handler(httpd_req_t *req) {
+    int sleep_sec, shutdown_sec;
+    get_sleep_config(&sleep_sec, &shutdown_sec);
+    int ps = get_music_power_save();
+    
+    char json[128];
+    snprintf(json, sizeof(json), "{\"sleep\":%d,\"shutdown\":%d,\"power_save\":%d}", 
+             sleep_sec, shutdown_sec, ps);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json);
+    return ESP_OK;
+}
+
+// Handler for music power save toggle
+static esp_err_t music_powersave_handler(httpd_req_t *req) {
+    char val[8];
+    if (get_query_param(req, "on", val, sizeof(val)) == ESP_OK) {
+        set_music_power_save(atoi(val));
+    }
+    int ps = get_music_power_save();
+    char json[48];
+    snprintf(json, sizeof(json), "{\"power_save\":%d}", ps);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json);
     return ESP_OK;
@@ -1742,6 +2141,477 @@ static esp_err_t dance_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// ====== Music streaming handlers ======
+static esp_err_t music_search_handler(httpd_req_t *req) {
+    char song[128] = {0};
+    char artist[128] = {0};
+    get_query_param(req, "song", song, sizeof(song));
+    get_query_param(req, "artist", artist, sizeof(artist));
+    url_decode_in_place(song);
+    url_decode_in_place(artist);
+    
+    if (strlen(song) == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing 'song' parameter");
+        return ESP_FAIL;
+    }
+    
+    ESP_LOGI(TAG, "Music search: song='%s' artist='%s'", song, artist);
+    // Stop SD player if running before streaming
+    SdPlayer_Stop();
+    int ok = StreamPlayer_SearchAndPlay(song, artist);
+    
+    httpd_resp_set_type(req, "application/json");
+    if (ok) {
+        httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    } else {
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"msg\":\"Search failed\"}");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t music_stop_handler(httpd_req_t *req) {
+    StreamPlayer_Stop();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+static esp_err_t music_status_handler(httpd_req_t *req) {
+    int state = StreamPlayer_GetState();
+    const char* title = StreamPlayer_GetTitle();
+    const char* artist = StreamPlayer_GetArtist();
+    const char* status = StreamPlayer_GetStatusText();
+    const char* lyric = StreamPlayer_GetCurrentLyricText();
+    int64_t time_ms = StreamPlayer_GetPlayTimeMs();
+    int lyric_idx = StreamPlayer_GetCurrentLyricIndex();
+    int lyric_count = StreamPlayer_GetLyricCount();
+    
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "state", state);
+    cJSON_AddStringToObject(root, "title", title ? title : "");
+    cJSON_AddStringToObject(root, "artist", artist ? artist : "");
+    cJSON_AddStringToObject(root, "status", status ? status : "");
+    cJSON_AddNumberToObject(root, "time_ms", (double)time_ms);
+    cJSON_AddStringToObject(root, "lyric", lyric ? lyric : "");
+    cJSON_AddNumberToObject(root, "lyric_idx", lyric_idx);
+    cJSON_AddNumberToObject(root, "lyric_count", lyric_count);
+    
+    char *json_str = cJSON_PrintUnformatted(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json_str ? json_str : "{}");
+    cJSON_free(json_str);
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+static esp_err_t music_server_handler(httpd_req_t *req) {
+    char url[256] = {0};
+    
+    // If no URL param -> return current server URL (GET query)
+    if (get_query_param(req, "url", url, sizeof(url)) != ESP_OK || strlen(url) == 0) {
+        // Return current server URL
+        const char* current = StreamPlayer_GetServerUrl();
+        char resp[300];
+        snprintf(resp, sizeof(resp), "{\"status\":\"ok\",\"url\":\"%s\"}", current ? current : "");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, resp);
+        return ESP_OK;
+    }
+    
+    // URL decode (encodeURIComponent encodes : and /)
+    url_decode_in_place(url);
+    
+    ESP_LOGI(TAG, "Set music server URL: %s", url);
+    StreamPlayer_SetServerUrl(url);  // Also saves to NVS
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+// ====== SD Card Player handlers ======
+static esp_err_t sd_list_handler(httpd_req_t *req) {
+    char path[256] = "/sdcard";
+    get_query_param(req, "path", path, sizeof(path));
+    url_decode_in_place(path);
+    
+    httpd_resp_set_type(req, "application/json");
+    
+    if (!SdPlayer_IsSdMounted()) {
+        httpd_resp_sendstr(req, "{\"mounted\":false,\"files\":[],\"total\":0}");
+        return ESP_OK;
+    }
+    
+    // Allocate file entries on heap
+    int max_files = 50;
+    sd_file_entry_t *entries = (sd_file_entry_t*)malloc(max_files * sizeof(sd_file_entry_t));
+    if (!entries) {
+        httpd_resp_sendstr(req, "{\"mounted\":true,\"files\":[],\"total\":0}");
+        return ESP_OK;
+    }
+    
+    int count = SdPlayer_ListDir(path, entries, max_files);
+    int total_playlist = SdPlayer_GetPlaylistSize();
+    
+    // Build JSON response - chunked to handle large lists
+    char buf[256];
+    snprintf(buf, sizeof(buf), "{\"mounted\":true,\"total\":%d,\"files\":[", total_playlist);
+    httpd_resp_send_chunk(req, buf, strlen(buf));
+    
+    for (int i = 0; i < count; i++) {
+        // Escape any quotes in filenames
+        char safe_name[256];
+        char safe_path[512];
+        int j = 0;
+        for (int k = 0; entries[i].name[k] && j < 254; k++) {
+            if (entries[i].name[k] == '"' || entries[i].name[k] == '\\') safe_name[j++] = '\\';
+            safe_name[j++] = entries[i].name[k];
+        }
+        safe_name[j] = '\0';
+        
+        j = 0;
+        for (int k = 0; entries[i].path[k] && j < 510; k++) {
+            if (entries[i].path[k] == '"' || entries[i].path[k] == '\\') safe_path[j++] = '\\';
+            safe_path[j++] = entries[i].path[k];
+        }
+        safe_path[j] = '\0';
+        
+        char entry_buf[1024];
+        snprintf(entry_buf, sizeof(entry_buf),
+            "%s{\"name\":\"%s\",\"path\":\"%s\",\"dir\":%s,\"size\":%ld}",
+            i > 0 ? "," : "",
+            safe_name, safe_path,
+            entries[i].is_dir ? "true" : "false",
+            entries[i].size);
+        httpd_resp_send_chunk(req, entry_buf, strlen(entry_buf));
+    }
+    
+    httpd_resp_send_chunk(req, "]}", 2);
+    httpd_resp_send_chunk(req, NULL, 0);  // End chunked
+    
+    free(entries);
+    return ESP_OK;
+}
+
+static esp_err_t sd_play_handler(httpd_req_t *req) {
+    char path[256] = {0};
+    get_query_param(req, "path", path, sizeof(path));
+    url_decode_in_place(path);
+    
+    httpd_resp_set_type(req, "application/json");
+    if (strlen(path) == 0) {
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"msg\":\"Missing path\"}");
+        return ESP_OK;
+    }
+    
+    ESP_LOGI(TAG, "SD play: %s", path);
+    int ok = SdPlayer_Play(path);
+    httpd_resp_sendstr(req, ok ? "{\"status\":\"ok\"}" : "{\"status\":\"error\"}");
+    return ESP_OK;
+}
+
+static esp_err_t sd_play_all_handler(httpd_req_t *req) {
+    char path[256] = "/sdcard";
+    get_query_param(req, "path", path, sizeof(path));
+    url_decode_in_place(path);
+    
+    httpd_resp_set_type(req, "application/json");
+    ESP_LOGI(TAG, "SD play all from: %s", path);
+    
+    SdPlayer_ScanAndBuildPlaylist(path);
+    SdPlayer_Next();  // Start playing first track
+    
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"status\":\"ok\",\"total\":%d}", SdPlayer_GetPlaylistSize());
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+static esp_err_t sd_stop_handler(httpd_req_t *req) {
+    SdPlayer_Stop();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+static esp_err_t sd_pause_handler(httpd_req_t *req) {
+    int state = SdPlayer_GetState();
+    if (state == 1) {  // PLAYING
+        SdPlayer_Pause();
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"ok\",\"paused\":true}");
+    } else if (state == 2) {  // PAUSED
+        SdPlayer_Resume();
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"ok\",\"paused\":false}");
+    } else {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"ok\",\"paused\":false}");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t sd_next_handler(httpd_req_t *req) {
+    SdPlayer_Next();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+static esp_err_t sd_prev_handler(httpd_req_t *req) {
+    SdPlayer_Previous();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+static esp_err_t sd_status_handler(httpd_req_t *req) {
+    int state = SdPlayer_GetState();
+    const char* track = SdPlayer_GetCurrentTrack();
+    int index = SdPlayer_GetCurrentIndex();
+    int total = SdPlayer_GetPlaylistSize();
+    
+    char resp[512];
+    // Escape track name for JSON
+    char safe_track[256];
+    int j = 0;
+    if (track) {
+        for (int k = 0; track[k] && j < 254; k++) {
+            if (track[k] == '"' || track[k] == '\\') safe_track[j++] = '\\';
+            safe_track[j++] = track[k];
+        }
+    }
+    safe_track[j] = '\0';
+    
+    snprintf(resp, sizeof(resp),
+        "{\"state\":%d,\"track\":\"%s\",\"index\":%d,\"total\":%d}",
+        state, safe_track, index, total);
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+// Handler for repeat mode get/set
+static esp_err_t sd_repeat_handler(httpd_req_t *req) {
+    char val[8];
+    if (get_query_param(req, "mode", val, sizeof(val)) == ESP_OK) {
+        int mode = atoi(val);
+        SdPlayer_SetRepeatMode(mode);
+    }
+    
+    int current_mode = SdPlayer_GetRepeatMode();
+    char resp[48];
+    snprintf(resp, sizeof(resp), "{\"mode\":%d}", current_mode);
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+// Helper: create parent directories recursively (like mkdir -p)
+static void mkdir_p(const char *filepath) {
+    char tmp[300];
+    strncpy(tmp, filepath, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+    
+    // Find last '/' to get directory path
+    char *last_slash = strrchr(tmp, '/');
+    if (!last_slash || last_slash == tmp) return;
+    *last_slash = '\0';
+    
+    // Create each directory in the path
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0755);
+}
+
+// SD Upload handler - receives raw file bytes via POST, filename in query param
+static esp_err_t sd_upload_handler(httpd_req_t *req) {
+    char filepath[300] = {0};
+    if (get_query_param(req, "path", filepath, sizeof(filepath)) != ESP_OK) {
+        ESP_LOGE(TAG, "SD upload: missing path param");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"Missing path param\"}");
+        return ESP_OK;
+    }
+    
+    // URL decode the path (JS sends encodeURIComponent which encodes / as %2F)
+    url_decode_in_place(filepath);
+    ESP_LOGI(TAG, "SD upload: path=%s content_len=%d", filepath, req->content_len);
+    
+    // Validate path starts with /sdcard
+    if (strncmp(filepath, "/sdcard", 7) != 0) {
+        ESP_LOGE(TAG, "SD upload: invalid path (not /sdcard)");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"Invalid path\"}");
+        return ESP_OK;
+    }
+    
+    if (!SdPlayer_IsSdMounted()) {
+        ESP_LOGE(TAG, "SD upload: SD not mounted");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"SD not mounted\"}");
+        return ESP_OK;
+    }
+    
+    int total_len = req->content_len;
+    if (total_len <= 0) {
+        ESP_LOGE(TAG, "SD upload: no content (content_len=%d)", total_len);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"Empty file\"}");
+        return ESP_OK;
+    }
+    
+    // Create parent directories if needed
+    mkdir_p(filepath);
+    
+    // Open file for writing
+    FILE *f = fopen(filepath, "wb");
+    if (!f) {
+        ESP_LOGE(TAG, "SD upload: fopen failed for %s (errno=%d)", filepath, errno);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"Cannot create file\"}");
+        return ESP_OK;
+    }
+    
+    int received = 0;
+    char *buf = (char *)malloc(4096);
+    if (!buf) {
+        fclose(f);
+        remove(filepath);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"Out of memory\"}");
+        return ESP_OK;
+    }
+    
+    bool write_error = false;
+    int timeout_count = 0;
+    while (received < total_len) {
+        int ret = httpd_req_recv(req, buf, 4096);
+        if (ret <= 0) {
+            if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+                timeout_count++;
+                if (timeout_count > 10) {
+                    ESP_LOGE(TAG, "SD upload: too many timeouts at %d/%d bytes", received, total_len);
+                    write_error = true;
+                    break;
+                }
+                continue;
+            }
+            ESP_LOGE(TAG, "SD upload: recv error %d at %d/%d bytes", ret, received, total_len);
+            write_error = true;
+            break;
+        }
+        timeout_count = 0;  // Reset on successful recv
+        if (fwrite(buf, 1, ret, f) != (size_t)ret) {
+            ESP_LOGE(TAG, "SD upload: fwrite failed at %d/%d bytes", received, total_len);
+            write_error = true;
+            break;
+        }
+        received += ret;
+    }
+    
+    free(buf);
+    fflush(f);
+    fclose(f);
+    
+    if (write_error) {
+        remove(filepath);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"Write failed\"}");
+        return ESP_OK;
+    }
+    
+    ESP_LOGI(TAG, "SD upload OK: %s (%d bytes)", filepath, received);
+    
+    char resp[128];
+    snprintf(resp, sizeof(resp), "{\"status\":\"ok\",\"size\":%d}", received);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+// SD Delete handler
+static esp_err_t sd_delete_handler(httpd_req_t *req) {
+    char filepath[300] = {0};
+    if (get_query_param(req, "path", filepath, sizeof(filepath)) != ESP_OK) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"Missing path\"}");
+        return ESP_OK;
+    }
+    
+    // URL decode the path
+    url_decode_in_place(filepath);
+    
+    if (strncmp(filepath, "/sdcard", 7) != 0) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"Invalid path\"}");
+        return ESP_OK;
+    }
+    
+    if (!SdPlayer_IsSdMounted()) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"SD not mounted\"}");
+        return ESP_OK;
+    }
+    
+    // Stop playback if deleting currently playing track
+    const char* current = SdPlayer_GetCurrentTrack();
+    if (current && strcmp(current, filepath) == 0) {
+        SdPlayer_Stop();
+    }
+    
+    if (remove(filepath) == 0) {
+        ESP_LOGI(TAG, "SD delete OK: %s", filepath);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    } else {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"Delete failed\"}");
+    }
+    return ESP_OK;
+}
+
+// Handler for mode switch (walk/roll) - non-blocking with background task
+static esp_err_t mode_handler(httpd_req_t *req) {
+    char mode_str[8];
+    if (get_query_param(req, "m", mode_str, sizeof(mode_str)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing m param");
+        return ESP_FAIL;
+    }
+    
+    int mode_val = (strcmp(mode_str, "roll") == 0) ? 1 : 0;
+    
+    // Record action if recording
+    recording_state_t *rec = get_recording_state();
+    if (rec->is_recording) {
+        record_action(mode_val ? ACTION_ROLL_MODE : ACTION_WALK_MODE, 0, 0, 0);
+        ESP_LOGI(TAG, "REC %s Mode", mode_val ? "Roll" : "Walk");
+    }
+    
+    // Run in background task (smooth_transform_legs blocks)
+    web_task_params_t *params = malloc(sizeof(web_task_params_t));
+    if (params) {
+        params->task_type = WEB_TASK_SET_MODE;
+        params->param1 = mode_val;
+        params->param2 = 0;
+        xTaskCreate(web_action_task, "mode_task", 3072, params, 5, NULL);
+    }
+    
+    // Respond immediately with current mode
+    httpd_resp_set_type(req, "application/json");
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"mode\":\"%s\"}", mode_val ? "roll" : "walk");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
 // URI handlers
 static const httpd_uri_t uri_root = {
     .uri = "/",
@@ -1785,6 +2655,27 @@ static const httpd_uri_t uri_get_led = {
     .user_ctx = NULL
 };
 
+static const httpd_uri_t uri_sleep_config = {
+    .uri = "/sleep_config",
+    .method = HTTP_GET,
+    .handler = sleep_config_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_get_sleep_config = {
+    .uri = "/get_sleep_config",
+    .method = HTTP_GET,
+    .handler = get_sleep_config_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_music_powersave = {
+    .uri = "/music_powersave",
+    .method = HTTP_GET,
+    .handler = music_powersave_handler,
+    .user_ctx = NULL
+};
+
 static const httpd_uri_t uri_reset_cal = {
     .uri = "/reset_cal",
     .method = HTTP_GET,
@@ -1796,6 +2687,13 @@ static const httpd_uri_t uri_home = {
     .uri = "/home",
     .method = HTTP_GET,
     .handler = home_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_mode = {
+    .uri = "/mode",
+    .method = HTTP_GET,
+    .handler = mode_handler,
     .user_ctx = NULL
 };
 
@@ -1940,11 +2838,120 @@ static const httpd_uri_t uri_dance = {
     .user_ctx = NULL
 };
 
+static const httpd_uri_t uri_music_search = {
+    .uri = "/music_search",
+    .method = HTTP_GET,
+    .handler = music_search_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_music_stop = {
+    .uri = "/music_stop",
+    .method = HTTP_GET,
+    .handler = music_stop_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_music_status = {
+    .uri = "/music_status",
+    .method = HTTP_GET,
+    .handler = music_status_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_music_server = {
+    .uri = "/music_server",
+    .method = HTTP_GET,
+    .handler = music_server_handler,
+    .user_ctx = NULL
+};
+
+// SD Card player URI handlers
+static const httpd_uri_t uri_sd_list = {
+    .uri = "/sd_list",
+    .method = HTTP_GET,
+    .handler = sd_list_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_sd_play = {
+    .uri = "/sd_play",
+    .method = HTTP_GET,
+    .handler = sd_play_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_sd_play_all = {
+    .uri = "/sd_play_all",
+    .method = HTTP_GET,
+    .handler = sd_play_all_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_sd_stop = {
+    .uri = "/sd_stop",
+    .method = HTTP_GET,
+    .handler = sd_stop_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_sd_pause = {
+    .uri = "/sd_pause",
+    .method = HTTP_GET,
+    .handler = sd_pause_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_sd_next = {
+    .uri = "/sd_next",
+    .method = HTTP_GET,
+    .handler = sd_next_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_sd_prev = {
+    .uri = "/sd_prev",
+    .method = HTTP_GET,
+    .handler = sd_prev_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_sd_status = {
+    .uri = "/sd_status",
+    .method = HTTP_GET,
+    .handler = sd_status_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_sd_repeat = {
+    .uri = "/sd_repeat",
+    .method = HTTP_GET,
+    .handler = sd_repeat_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_sd_upload = {
+    .uri = "/sd_upload",
+    .method = HTTP_POST,
+    .handler = sd_upload_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_sd_delete = {
+    .uri = "/sd_delete",
+    .method = HTTP_GET,
+    .handler = sd_delete_handler,
+    .user_ctx = NULL
+};
+
 httpd_handle_t webserver_start(void) {
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 30;  // Increased for wave + JSON + dance endpoints
+    config.max_uri_handlers = 50;  // Increased for all endpoints + upload/delete
+    config.max_resp_headers = 8;
+    config.recv_wait_timeout = 60;  // 60s timeout for large file uploads
+    config.stack_size = 12288;  // 12KB stack for upload handler with mkdir
     
     // Load saved actions from NVS on startup
     for (int i = 0; i < 3; i++) {
@@ -1960,8 +2967,12 @@ httpd_handle_t webserver_start(void) {
         httpd_register_uri_handler(server, &uri_get_cal);
         httpd_register_uri_handler(server, &uri_led);
         httpd_register_uri_handler(server, &uri_get_led);
+        httpd_register_uri_handler(server, &uri_sleep_config);
+        httpd_register_uri_handler(server, &uri_get_sleep_config);
+        httpd_register_uri_handler(server, &uri_music_powersave);
         httpd_register_uri_handler(server, &uri_reset_cal);
         httpd_register_uri_handler(server, &uri_home);
+        httpd_register_uri_handler(server, &uri_mode);
         httpd_register_uri_handler(server, &uri_move);
         httpd_register_uri_handler(server, &uri_testfoot);
         httpd_register_uri_handler(server, &uri_phase);
@@ -1977,6 +2988,22 @@ httpd_handle_t webserver_start(void) {
         httpd_register_uri_handler(server, &uri_action_json_get);
         httpd_register_uri_handler(server, &uri_action_json_post);
         httpd_register_uri_handler(server, &uri_dance);
+        httpd_register_uri_handler(server, &uri_music_search);
+        httpd_register_uri_handler(server, &uri_music_stop);
+        httpd_register_uri_handler(server, &uri_music_status);
+        httpd_register_uri_handler(server, &uri_music_server);
+        // SD Card handlers
+        httpd_register_uri_handler(server, &uri_sd_list);
+        httpd_register_uri_handler(server, &uri_sd_play);
+        httpd_register_uri_handler(server, &uri_sd_play_all);
+        httpd_register_uri_handler(server, &uri_sd_stop);
+        httpd_register_uri_handler(server, &uri_sd_pause);
+        httpd_register_uri_handler(server, &uri_sd_next);
+        httpd_register_uri_handler(server, &uri_sd_prev);
+        httpd_register_uri_handler(server, &uri_sd_status);
+        httpd_register_uri_handler(server, &uri_sd_repeat);
+        httpd_register_uri_handler(server, &uri_sd_upload);
+        httpd_register_uri_handler(server, &uri_sd_delete);
         
         ESP_LOGI(TAG, "Web server started!");
         return server;

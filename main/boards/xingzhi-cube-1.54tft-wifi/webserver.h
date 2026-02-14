@@ -18,6 +18,14 @@ httpd_handle_t webserver_start(void);
 // Stop the web server
 void webserver_stop(httpd_handle_t server);
 
+// Sleep config callbacks (implemented in board .cc, called from webserver.c)
+void set_sleep_config(int sleep_sec, int shutdown_sec);
+void get_sleep_config(int* sleep_sec, int* shutdown_sec);
+
+// Music power save mode (implemented in board .cc, called from webserver.c)
+void set_music_power_save(int enable);
+int get_music_power_save(void);
+
 #ifdef __cplusplus
 }
 #endif

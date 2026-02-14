@@ -16,6 +16,11 @@ public:
     void OnShutdownRequest(std::function<void()> callback);
     void WakeUp();
 
+    void SetSleepSeconds(int seconds) { seconds_to_sleep_ = seconds; ticks_ = 0; }
+    void SetShutdownSeconds(int seconds) { seconds_to_shutdown_ = seconds; ticks_ = 0; }
+    int GetSleepSeconds() const { return seconds_to_sleep_; }
+    int GetShutdownSeconds() const { return seconds_to_shutdown_; }
+
 private:
     void PowerSaveCheck();
 

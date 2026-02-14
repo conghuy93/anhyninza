@@ -30,6 +30,10 @@ typedef struct {
 static void move_task_func(void* pvParameters) {
     move_task_params_t* params = (move_task_params_t*)pvParameters;
     
+    // CRITICAL: Clear manual_mode so robot_control_task processes joystick values
+    // (tilt/dance/servo_direct_write set manual_mode=true and never clear it)
+    set_manual_mode(false);
+    
     if (params->is_roll) {
         ninja_set_roll();
     } else {
@@ -104,6 +108,8 @@ static void dance_task_func(void* pvParameters) {
         ninja_stop_music();
     }
     
+    // CRITICAL: Clear manual_mode before go_home so robot_control_task resumes
+    set_manual_mode(false);
     go_home();
     ESP_LOGI(TAG_MCP, "Dance task finished");
     
@@ -220,12 +226,16 @@ static void register_robot_mcp_tools() {
             if (direction == "left") {
                 ninja_tilt_left();
                 ESP_LOGI(TAG_MCP, "Tilted left");
-                return std::string("Robot đã nghiêng trái");
             } else {
                 ninja_tilt_right();
                 ESP_LOGI(TAG_MCP, "Tilted right");
-                return std::string("Robot đã nghiêng phải");
             }
+            
+            // Hold tilt for 1 second then clear manual_mode so subsequent MCP commands work
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            set_manual_mode(false);
+            
+            return std::string(direction == "left" ? "Robot đã nghiêng trái" : "Robot đã nghiêng phải");
         }
     );
     
@@ -389,7 +399,7 @@ static void register_robot_mcp_tools() {
     // LED mode control
     mcp_server.AddTool(
         "self.robot.led.mode",
-        "Đặt chế độ hiệu ứng LED. mode: off, solid, rainbow, breathing, chase, blink, strobe, fade, comet, sparkle, theater.",
+        "Đặt chế độ hiệu ứng LED. mode: off, solid, rainbow, breathing, chase, blink, strobe, fade, comet, sparkle, theater, music (nhảy theo nhạc).",
         PropertyList({
             Property("mode", kPropertyTypeString),
         }),
@@ -409,6 +419,7 @@ static void register_robot_mcp_tools() {
             else if (mode_str == "comet") mode = LED_MODE_COMET;
             else if (mode_str == "sparkle") mode = LED_MODE_SPARKLE;
             else if (mode_str == "theater") mode = LED_MODE_THEATER_CHASE;
+            else if (mode_str == "music") mode = LED_MODE_MUSIC_REACTIVE;
             
             ninja_led_set_mode(mode);
             ESP_LOGI(TAG_MCP, "LED mode: %s", mode_str.c_str());

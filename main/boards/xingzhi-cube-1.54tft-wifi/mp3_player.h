@@ -8,6 +8,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <esp_ae_rate_cvt.h>
 
 class AudioCodec;
 
@@ -15,6 +16,12 @@ enum class Mp3PlayerState {
     STOPPED,
     PLAYING,
     PAUSED
+};
+
+enum class Mp3RepeatMode {
+    OFF = 0,         // No repeat - stop after playlist ends
+    REPEAT_ONE = 1,  // Repeat current track
+    REPEAT_ALL = 2   // Repeat entire playlist
 };
 
 class Mp3Player {
@@ -43,6 +50,10 @@ public:
     const std::string& GetCurrentTrack() const { return current_track_; }
     int GetCurrentIndex() const { return current_index_; }
     int GetPlaylistSize() const { return playlist_.size(); }
+    
+    // Repeat mode
+    void SetRepeatMode(Mp3RepeatMode mode) { repeat_mode_ = mode; }
+    Mp3RepeatMode GetRepeatMode() const { return repeat_mode_; }
 
     // Callbacks
     void OnTrackChanged(std::function<void(const std::string&)> callback) { on_track_changed_ = callback; }
@@ -52,6 +63,7 @@ public:
 private:
     AudioCodec* codec_;
     Mp3PlayerState state_ = Mp3PlayerState::STOPPED;
+    Mp3RepeatMode repeat_mode_ = Mp3RepeatMode::REPEAT_ALL;
     
     std::vector<std::string> playlist_;
     std::string current_track_;
@@ -70,6 +82,10 @@ private:
     void* mp3_decoder_ = nullptr;   // mp3dec_t*
     void* pcm_buffer_ = nullptr;    // int16_t*
     void* input_buffer_ = nullptr;  // uint8_t*
+    
+    // ESP optimized resampler
+    esp_ae_rate_cvt_handle_t resampler_ = nullptr;
+    int resampler_src_rate_ = 0;
     
     std::function<void(const std::string&)> on_track_changed_;
     std::function<void()> on_playback_finished_;

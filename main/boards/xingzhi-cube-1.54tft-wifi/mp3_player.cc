@@ -17,6 +17,11 @@
 #include <sys/stat.h>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
+
+extern "C" {
+    #include "robot_control.h"
+}
 
 static const char* TAG = "Mp3Player";
 
@@ -51,6 +56,12 @@ void Mp3Player::CleanupDecodeResources() {
         free(input_buffer_);
         input_buffer_ = nullptr;
     }
+    // Close resampler
+    if (resampler_) {
+        esp_ae_rate_cvt_close(resampler_);
+        resampler_ = nullptr;
+    }
+    resampler_src_rate_ = 0;
 }
 
 bool Mp3Player::Play(const std::string& filepath) {
@@ -389,33 +400,90 @@ void Mp3Player::DecodeAndPlay(const std::string& filepath) {
                 first_frame = false;
             }
             
-            // Resample if source rate differs from output rate
-            if (info.hz != target_sample_rate && info.hz > 0) {
-                float ratio = (float)info.hz / target_sample_rate;
-                int output_samples = (int)(samples / ratio);
-                
-                for (int i = 0; i < output_samples; i++) {
-                    int src_idx = (int)(i * ratio);
-                    if (src_idx >= samples) src_idx = samples - 1;
-                    
-                    if (info.channels == 2) {
-                        int16_t mono = (pcm[src_idx * 2] + pcm[src_idx * 2 + 1]) / 2;
-                        output_buffer.push_back(mono);
-                    } else {
-                        output_buffer.push_back(pcm[src_idx]);
-                    }
+            // Compute audio energy for music-reactive LED
+            {
+                int total_samples = samples * info.channels;
+                int64_t sum_sq = 0;
+                for (int i = 0; i < total_samples; i++) {
+                    int32_t s = pcm[i];
+                    sum_sq += s * s;
                 }
-                total_output_samples += output_samples;
-            } else {
+                float rms = sqrtf((float)sum_sq / total_samples);
+                // Normalize: 32768 is max int16, map RMS to 0.0-1.0
+                // Typical music RMS ~3000-8000, so scale with headroom
+                float energy = rms / 12000.0f;
+                if (energy > 1.0f) energy = 1.0f;
+                ninja_led_set_audio_energy(energy);
+            }
+            
+            // === Stereo to Mono conversion (if stereo) ===
+            std::vector<int16_t> mono_pcm;
+            int16_t* mono_data = pcm;
+            int mono_samples = samples;
+            
+            if (info.channels == 2) {
+                mono_pcm.resize(samples);
                 for (int i = 0; i < samples; i++) {
-                    if (info.channels == 2) {
-                        int16_t mono = (pcm[i * 2] + pcm[i * 2 + 1]) / 2;
-                        output_buffer.push_back(mono);
+                    // Use int32_t to avoid overflow/clipping
+                    int32_t left = pcm[i * 2];
+                    int32_t right = pcm[i * 2 + 1];
+                    mono_pcm[i] = (int16_t)((left + right) / 2);
+                }
+                mono_data = mono_pcm.data();
+            }
+            
+            // === Resample using ESP optimized rate converter ===
+            if (info.hz != target_sample_rate && info.hz > 0) {
+                // Create/recreate resampler if source rate changed
+                if (resampler_src_rate_ != info.hz || resampler_ == nullptr) {
+                    if (resampler_) {
+                        esp_ae_rate_cvt_close(resampler_);
+                        resampler_ = nullptr;
+                    }
+                    esp_ae_rate_cvt_cfg_t cfg = {
+                        .src_rate = (uint32_t)info.hz,
+                        .dest_rate = (uint32_t)target_sample_rate,
+                        .channel = 1, // ESP_AUDIO_MONO
+                        .bits_per_sample = ESP_AE_BIT16,
+                        .complexity = 2,
+                        .perf_type = ESP_AE_RATE_CVT_PERF_TYPE_SPEED,
+                    };
+                    esp_err_t ret = esp_ae_rate_cvt_open(&cfg, &resampler_);
+                    if (ret != ESP_OK || !resampler_) {
+                        ESP_LOGE(TAG, "Failed to create resampler: %d", ret);
+                        // Fallback: direct copy
+                        for (int i = 0; i < mono_samples; i++) {
+                            output_buffer.push_back(mono_data[i]);
+                        }
+                        total_output_samples += mono_samples;
                     } else {
-                        output_buffer.push_back(pcm[i]);
+                        resampler_src_rate_ = info.hz;
+                        ESP_LOGI(TAG, "Created resampler: %d -> %d Hz", info.hz, target_sample_rate);
                     }
                 }
-                total_output_samples += samples;
+                
+                if (resampler_) {
+                    // Get max output samples
+                    uint32_t max_out_samples = 0;
+                    esp_ae_rate_cvt_get_max_out_sample_num(resampler_, mono_samples, &max_out_samples);
+                    
+                    std::vector<int16_t> resampled(max_out_samples);
+                    uint32_t actual_output = max_out_samples;
+                    esp_ae_rate_cvt_process(resampler_, (esp_ae_sample_t)mono_data, mono_samples,
+                                            (esp_ae_sample_t)resampled.data(), &actual_output);
+                    
+                    // Append to output buffer
+                    for (uint32_t i = 0; i < actual_output; i++) {
+                        output_buffer.push_back(resampled[i]);
+                    }
+                    total_output_samples += actual_output;
+                }
+            } else {
+                // No resample needed - direct copy
+                for (int i = 0; i < mono_samples; i++) {
+                    output_buffer.push_back(mono_data[i]);
+                }
+                total_output_samples += mono_samples;
             }
             
             // Output when buffer is full enough
@@ -439,6 +507,9 @@ void Mp3Player::DecodeAndPlay(const std::string& filepath) {
     if (!output_buffer.empty() && !stop_requested_) {
         codec_->OutputData(output_buffer);
     }
+    
+    // Reset LED audio energy when playback ends
+    ninja_led_set_audio_energy(0.0f);
     
     int64_t elapsed_ms = (esp_timer_get_time() - start_time) / 1000;
     float expected_duration = (float)total_output_samples / target_sample_rate;

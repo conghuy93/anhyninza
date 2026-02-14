@@ -495,6 +495,11 @@ void Application::InitializeProtocol() {
     
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
         if (GetDeviceState() == kDeviceStateSpeaking) {
+            // Block TTS audio when music is playing (SD or streaming)
+            auto& board = Board::GetInstance();
+            if (board.IsMusicPlaying()) {
+                return;  // Drop TTS audio
+            }
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
@@ -523,6 +528,12 @@ void Application::InitializeProtocol() {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
+                    // Block TTS start when music is playing
+                    auto& board = Board::GetInstance();
+                    if (board.IsMusicPlaying()) {
+                        ESP_LOGW(TAG, "Blocking TTS start - music is playing");
+                        return;
+                    }
                     aborted_ = false;
                     SetDeviceState(kDeviceStateSpeaking);
                 });

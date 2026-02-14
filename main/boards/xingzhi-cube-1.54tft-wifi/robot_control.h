@@ -281,7 +281,8 @@ typedef enum {
     LED_MODE_FADE,          // Fade in/out
     LED_MODE_COMET,         // Comet tail
     LED_MODE_SPARKLE,       // Random sparkle
-    LED_MODE_THEATER_CHASE  // Theater chase
+    LED_MODE_THEATER_CHASE, // Theater chase
+    LED_MODE_MUSIC_REACTIVE // React to music beats
 } led_mode_t;
 
 // LED state structure
@@ -306,6 +307,10 @@ void ninja_led_update(void);
 led_state_t* get_led_state(void);
 void save_led_state_to_nvs(void);
 void load_led_state_from_nvs(void);
+
+// Music-reactive LED: feed audio energy (0.0 - 1.0) from audio decoders
+void ninja_led_set_audio_energy(float energy);
+float ninja_led_get_audio_energy(void);
 
 // Music playback functions (for dance)
 void set_music_player_ptr(void* mp3_player_ptr);

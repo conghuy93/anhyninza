@@ -1703,6 +1703,19 @@ static bool led_initialized = false;
 static uint32_t led_animation_step = 0;
 static uint32_t led_last_update = 0;
 
+// Music-reactive audio energy (set by audio decoders, read by LED update)
+static volatile float audio_energy_level = 0.0f;
+
+void ninja_led_set_audio_energy(float energy) {
+    if (energy < 0.0f) energy = 0.0f;
+    if (energy > 1.0f) energy = 1.0f;
+    audio_energy_level = energy;
+}
+
+float ninja_led_get_audio_energy(void) {
+    return audio_energy_level;
+}
+
 void ninja_led_init(void) {
     if (led_initialized) return;
     
@@ -1843,7 +1856,7 @@ void ninja_led_update(void) {
     
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
     
-    if (led_state.mode != LED_MODE_SOLID && led_state.mode != LED_MODE_OFF) {
+    if (led_state.mode != LED_MODE_SOLID && led_state.mode != LED_MODE_OFF && led_state.mode != LED_MODE_MUSIC_REACTIVE) {
         if (now - led_last_update < led_state.speed) {
             return;
         }
@@ -2019,6 +2032,90 @@ void ninja_led_update(void) {
                 led_strip_set_pixel(led_strip, i, br, bg, bb);
             }
             led_animation_step++;
+            break;
+        }
+        
+        case LED_MODE_MUSIC_REACTIVE: {
+            // Music-reactive LED effect: VU meter + beat flash + peak hold
+            static float smooth_energy = 0.0f;
+            static float peak_val = 0.0f;
+            static uint8_t beat_flash = 0;
+            static uint16_t hue_offset = 0;
+            static uint32_t music_last_update = 0;
+            
+            // Rate limit to ~30fps (33ms) for smooth visual
+            uint32_t music_now = (uint32_t)(esp_timer_get_time() / 1000);
+            if (music_now - music_last_update < 33) {
+                return; // skip refresh below too
+            }
+            music_last_update = music_now;
+            
+            float energy = ninja_led_get_audio_energy();
+            
+            // Exponential smoothing for baseline
+            smooth_energy = smooth_energy * 0.85f + energy * 0.15f;
+            
+            // Peak hold with slow decay
+            if (energy > peak_val) {
+                peak_val = energy;
+            } else {
+                peak_val *= 0.95f;
+            }
+            
+            // Beat detection: energy spike above smoothed baseline
+            if (energy > smooth_energy * 1.8f + 0.08f && beat_flash == 0) {
+                beat_flash = 6; // flash for 6 frames (~200ms)
+                hue_offset = (hue_offset + 40) % 360; // shift color on each beat
+            }
+            
+            // How many LEDs to light based on energy
+            int num_leds = (int)(energy * LED_STRIP_COUNT + 0.5f);
+            if (num_leds > LED_STRIP_COUNT) num_leds = LED_STRIP_COUNT;
+            
+            // Peak LED marker position
+            int peak_led = (int)(peak_val * (LED_STRIP_COUNT - 1));
+            if (peak_led >= LED_STRIP_COUNT) peak_led = LED_STRIP_COUNT - 1;
+            
+            if (beat_flash > 0) {
+                // === BEAT FLASH: all LEDs burst in shifting hue ===
+                uint8_t flash_intensity = (uint8_t)(beat_flash * 255 / 6);
+                flash_intensity = apply_brightness(flash_intensity, led_state.brightness);
+                uint8_t fr, fg, fb;
+                hsv_to_rgb(hue_offset, 255, 255, &fr, &fg, &fb);
+                fr = apply_brightness(fr, flash_intensity);
+                fg = apply_brightness(fg, flash_intensity);
+                fb = apply_brightness(fb, flash_intensity);
+                for (int i = 0; i < LED_STRIP_COUNT; i++) {
+                    led_strip_set_pixel(led_strip, i, fr, fg, fb);
+                }
+                beat_flash--;
+            } else {
+                // === VU METER: LEDs light up proportional to energy ===
+                for (int i = 0; i < LED_STRIP_COUNT; i++) {
+                    if (i < num_leds) {
+                        // Color gradient: green(120) → yellow(60) → red(0) based on position
+                        uint16_t hue = (uint16_t)(120 - (i * 120 / LED_STRIP_COUNT));
+                        hue = (hue + hue_offset) % 360;
+                        uint8_t val = (uint8_t)(energy * 255);
+                        if (val < 80) val = 80; // minimum brightness for lit LEDs
+                        uint8_t vr, vg, vb;
+                        hsv_to_rgb(hue, 255, val, &vr, &vg, &vb);
+                        vr = apply_brightness(vr, led_state.brightness);
+                        vg = apply_brightness(vg, led_state.brightness);
+                        vb = apply_brightness(vb, led_state.brightness);
+                        led_strip_set_pixel(led_strip, i, vr, vg, vb);
+                    } else if (i == peak_led && peak_val > 0.05f) {
+                        // Peak hold indicator - white dot
+                        uint8_t pw = apply_brightness(180, led_state.brightness);
+                        led_strip_set_pixel(led_strip, i, pw, pw, pw);
+                    } else {
+                        // Background: dim blue glow based on ambient energy
+                        uint8_t bg_glow = (uint8_t)(smooth_energy * 30);
+                        bg_glow = apply_brightness(bg_glow, led_state.brightness);
+                        led_strip_set_pixel(led_strip, i, 0, 0, bg_glow);
+                    }
+                }
+            }
             break;
         }
     }

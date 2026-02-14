@@ -1,6 +1,7 @@
 #include "wifi_board.h"
 #include "codecs/no_audio_codec.h"
 #include "display/lcd_display.h"
+#include "display/lvgl_display/lvgl_theme.h"
 #include "system_reset.h"
 #include "application.h"
 #include "button.h"
@@ -12,6 +13,11 @@
 
 #include <esp_log.h>
 #include <esp_lcd_panel_vendor.h>
+#include <esp_lvgl_port.h>
+#include <esp_timer.h>
+#include <esp_heap_caps.h>
+#include <nvs_flash.h>
+#include <atomic>
 
 #include "mcp_server.h"
 #include <driver/rtc_io.h>
@@ -20,6 +26,8 @@
 #include <sdmmc_cmd.h>
 #include <driver/sdspi_host.h>
 #include "mp3_player.h"
+#include "mp3_player_c.h"
+#include "stream_player.h"
 
 // Robot control
 #include "robot_control.h"
@@ -28,11 +36,62 @@
 #include <esp_event.h>
 #include <esp_wifi.h>
 #include <esp_netif.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 // Forward declaration for C function in robot_control.c
 extern "C" void set_music_player_ptr(void* mp3_player_ptr);
 
 #define TAG "XINGZHI_CUBE_1_54TFT_WIFI"
+
+// Forward declaration
+class XINGZHI_CUBE_1_54TFT_WIFI;
+
+// ====== Global pointers for C interface (must be before class methods) ======
+static XINGZHI_CUBE_1_54TFT_WIFI* g_board_instance = nullptr;
+static Mp3Player* g_sd_player = nullptr;
+static bool g_sd_mounted = false;
+static std::vector<std::string>* g_playlist_cache = nullptr;
+
+// ====== Sleep config & music power save (C-accessible from webserver.c) ======
+static PowerSaveTimer* g_pst_ptr = nullptr;
+static std::atomic<bool> g_music_power_save{false};
+static std::atomic<bool> g_music_power_save_applied{false};
+
+extern "C" void set_sleep_config(int sleep_sec, int shutdown_sec) {
+    if (g_pst_ptr) {
+        g_pst_ptr->SetSleepSeconds(sleep_sec);
+        g_pst_ptr->SetShutdownSeconds(shutdown_sec);
+        ESP_LOGI(TAG, "Sleep config updated: sleep=%ds, shutdown=%ds", sleep_sec, shutdown_sec);
+    }
+    // Save to NVS
+    nvs_handle_t handle;
+    if (nvs_open("sleep_cfg", NVS_READWRITE, &handle) == ESP_OK) {
+        nvs_set_i32(handle, "sleep_s", sleep_sec);
+        nvs_set_i32(handle, "shut_s", shutdown_sec);
+        nvs_commit(handle);
+        nvs_close(handle);
+    }
+}
+
+extern "C" void get_sleep_config(int* sleep_sec, int* shutdown_sec) {
+    if (g_pst_ptr) {
+        *sleep_sec = g_pst_ptr->GetSleepSeconds();
+        *shutdown_sec = g_pst_ptr->GetShutdownSeconds();
+    } else {
+        *sleep_sec = 60;
+        *shutdown_sec = 300;
+    }
+}
+
+extern "C" void set_music_power_save(int enable) {
+    g_music_power_save.store(enable != 0);
+    ESP_LOGI(TAG, "Music power save: %s", enable ? "ON" : "OFF");
+}
+
+extern "C" int get_music_power_save(void) {
+    return g_music_power_save.load() ? 1 : 0;
+}
 
 class XINGZHI_CUBE_1_54TFT_WIFI : public WifiBoard {
 private:
@@ -49,6 +108,551 @@ private:
     bool sd_card_mounted_ = false;
     httpd_handle_t robot_webserver_ = nullptr;
     bool robot_initialized_ = false;
+
+    // Music display overlay (LVGL)
+    lv_obj_t* music_panel_ = nullptr;
+    lv_obj_t* music_icon_label_ = nullptr;
+    lv_obj_t* music_icon_bg_ = nullptr;  // Background circle for icon
+    lv_obj_t* music_title_label_ = nullptr;
+    lv_obj_t* music_artist_label_ = nullptr;
+    lv_obj_t* music_state_label_ = nullptr;
+    lv_obj_t* music_track_label_ = nullptr;
+    lv_obj_t* music_progress_bar_ = nullptr;
+    esp_timer_handle_t music_display_timer_ = nullptr;
+    bool music_display_visible_ = false;
+    
+    // Spectrum bars for music visualization
+    static constexpr int SPECTRUM_BAR_COUNT = 12;
+    lv_obj_t* spectrum_bars_[SPECTRUM_BAR_COUNT] = {nullptr};
+    int spectrum_heights_[SPECTRUM_BAR_COUNT] = {0};
+    uint32_t spectrum_seed_ = 12345;  // For pseudo-random animation
+
+    // Auto LED music mode tracking
+    bool music_led_active_ = false;        // True when we switched LEDs for music
+    led_state_t led_saved_before_music_;    // LED state before music auto-switch
+
+    // Volume popup overlay (LVGL)
+    lv_obj_t* volume_popup_ = nullptr;
+    lv_obj_t* volume_bar_ = nullptr;
+    lv_obj_t* volume_icon_label_ = nullptr;
+    lv_obj_t* volume_value_label_ = nullptr;
+    esp_timer_handle_t volume_popup_timer_ = nullptr;
+
+    // Get text font from theme (supports Vietnamese/Chinese), fallback to montserrat
+    const lv_font_t* GetTextFont() {
+        if (display_ && display_->GetTheme()) {
+            auto lvgl_theme = static_cast<LvglTheme*>(display_->GetTheme());
+            if (lvgl_theme && lvgl_theme->text_font()) {
+                return lvgl_theme->text_font()->font();
+            }
+        }
+        return &lv_font_montserrat_14;  // Fallback for icons/ASCII only
+    }
+    
+    // Simple pseudo-random for spectrum animation variation
+    uint32_t NextRandom() {
+        spectrum_seed_ = spectrum_seed_ * 1103515245 + 12345;
+        return (spectrum_seed_ / 65536) % 32768;
+    }
+    
+    // Update spectrum bars animation based on actual audio energy
+    void UpdateSpectrumBars(bool playing) {
+        if (!music_panel_) return;
+        
+        // Get actual audio energy (0.0 - 1.0)
+        float energy = ninja_led_get_audio_energy();
+        
+        for (int i = 0; i < SPECTRUM_BAR_COUNT; i++) {
+            if (!spectrum_bars_[i]) continue;
+            
+            int target_height;
+            if (playing && energy > 0.01f) {
+                // Use actual audio energy with some random variation for visual interest
+                // Base height from energy (5-50 pixels based on energy level)
+                int base_height = (int)(5 + energy * 45);
+                // Add random variation (-10 to +10 pixels) for different bars
+                int variation = (int)((NextRandom() % 21) - 10);
+                // Apply position-based multiplier (center bars higher)
+                float position_factor = 1.0f - 0.3f * abs(i - SPECTRUM_BAR_COUNT/2) / (float)(SPECTRUM_BAR_COUNT/2);
+                target_height = (int)((base_height + variation) * position_factor);
+                // Clamp to valid range
+                if (target_height < 5) target_height = 5;
+                if (target_height > 55) target_height = 55;
+            } else if (playing) {
+                // Playing but very low energy - show minimal movement
+                target_height = 5 + (NextRandom() % 8);
+            } else {
+                // Paused/stopped - low idle heights
+                target_height = 5 + (NextRandom() % 8);
+            }
+            
+            // Smooth interpolation for fluid animation
+            spectrum_heights_[i] = (spectrum_heights_[i] * 2 + target_height) / 3;
+            
+            lv_obj_set_height(spectrum_bars_[i], spectrum_heights_[i]);
+            lv_obj_align(spectrum_bars_[i], LV_ALIGN_BOTTOM_MID, 
+                        (i - SPECTRUM_BAR_COUNT/2) * 16 + 8, -10);
+        }
+    }
+
+    void CreateMusicDisplay() {
+        if (music_panel_) return;  // Already created
+        
+        lvgl_port_lock(0);
+        auto screen = lv_screen_active();
+        
+        // ===== Full-screen overlay with gradient background =====
+        music_panel_ = lv_obj_create(screen);
+        lv_obj_set_size(music_panel_, 240, 240);
+        lv_obj_align(music_panel_, LV_ALIGN_CENTER, 0, 0);
+        // Dark gradient background: deep navy to dark purple
+        lv_obj_set_style_bg_color(music_panel_, lv_color_hex(0x0a0a1a), 0);
+        lv_obj_set_style_bg_grad_color(music_panel_, lv_color_hex(0x1a0a2e), 0);
+        lv_obj_set_style_bg_grad_dir(music_panel_, LV_GRAD_DIR_VER, 0);
+        lv_obj_set_style_bg_opa(music_panel_, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(music_panel_, 0, 0);
+        lv_obj_set_style_radius(music_panel_, 0, 0);
+        lv_obj_set_style_pad_all(music_panel_, 0, 0);
+        lv_obj_set_scrollbar_mode(music_panel_, LV_SCROLLBAR_MODE_OFF);
+        
+        // ===== Decorative top accent line (neon pink) =====
+        lv_obj_t* accent_line = lv_obj_create(music_panel_);
+        lv_obj_set_size(accent_line, 200, 3);
+        lv_obj_align(accent_line, LV_ALIGN_TOP_MID, 0, 12);
+        lv_obj_set_style_bg_color(accent_line, lv_color_hex(0xff1493), 0);
+        lv_obj_set_style_bg_opa(accent_line, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(accent_line, 0, 0);
+        lv_obj_set_style_radius(accent_line, 2, 0);
+        lv_obj_set_style_shadow_color(accent_line, lv_color_hex(0xff1493), 0);
+        lv_obj_set_style_shadow_width(accent_line, 15, 0);
+        lv_obj_set_style_shadow_spread(accent_line, 3, 0);
+        lv_obj_set_style_shadow_opa(accent_line, LV_OPA_60, 0);
+        
+        // ===== Music icon with glow circle background =====
+        music_icon_bg_ = lv_obj_create(music_panel_);
+        lv_obj_set_size(music_icon_bg_, 50, 50);
+        lv_obj_align(music_icon_bg_, LV_ALIGN_TOP_MID, 0, 24);
+        lv_obj_set_style_bg_color(music_icon_bg_, lv_color_hex(0x1e0a3c), 0);
+        lv_obj_set_style_bg_opa(music_icon_bg_, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(music_icon_bg_, lv_color_hex(0xff1493), 0);
+        lv_obj_set_style_border_width(music_icon_bg_, 2, 0);
+        lv_obj_set_style_border_opa(music_icon_bg_, LV_OPA_70, 0);
+        lv_obj_set_style_radius(music_icon_bg_, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_shadow_color(music_icon_bg_, lv_color_hex(0xff1493), 0);
+        lv_obj_set_style_shadow_width(music_icon_bg_, 20, 0);
+        lv_obj_set_style_shadow_spread(music_icon_bg_, 5, 0);
+        lv_obj_set_style_shadow_opa(music_icon_bg_, LV_OPA_40, 0);
+        
+        music_icon_label_ = lv_label_create(music_icon_bg_);
+        lv_label_set_text(music_icon_label_, LV_SYMBOL_AUDIO);
+        lv_obj_set_style_text_color(music_icon_label_, lv_color_hex(0xff69b4), 0);
+        lv_obj_set_style_text_font(music_icon_label_, &lv_font_montserrat_14, 0);
+        lv_obj_center(music_icon_label_);
+        
+        // ===== State label (Playing / Paused / Buffering) =====
+        music_state_label_ = lv_label_create(music_panel_);
+        lv_label_set_text(music_state_label_, "");
+        lv_obj_align(music_state_label_, LV_ALIGN_TOP_MID, 0, 82);
+        lv_obj_set_style_text_color(music_state_label_, lv_color_hex(0x00ff88), 0);
+        lv_obj_set_style_text_font(music_state_label_, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_letter_space(music_state_label_, 2, 0);
+        
+        // ===== Track Title (large, scrolling, bright white) =====
+        // Use theme font for Vietnamese/Chinese support
+        music_title_label_ = lv_label_create(music_panel_);
+        lv_label_set_text(music_title_label_, "---");
+        lv_obj_set_width(music_title_label_, 210);
+        lv_obj_align(music_title_label_, LV_ALIGN_TOP_MID, 0, 106);
+        lv_label_set_long_mode(music_title_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+        lv_obj_set_style_text_align(music_title_label_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(music_title_label_, lv_color_hex(0xffffff), 0);
+        lv_obj_set_style_text_font(music_title_label_, GetTextFont(), 0);
+        lv_obj_set_style_text_letter_space(music_title_label_, 1, 0);
+        
+        // ===== Artist / folder label (muted blue-white) =====
+        // Use theme font for Vietnamese/Chinese support
+        music_artist_label_ = lv_label_create(music_panel_);
+        lv_label_set_text(music_artist_label_, "");
+        lv_obj_set_width(music_artist_label_, 210);
+        lv_obj_align(music_artist_label_, LV_ALIGN_TOP_MID, 0, 128);
+        lv_label_set_long_mode(music_artist_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+        lv_obj_set_style_text_align(music_artist_label_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(music_artist_label_, lv_color_hex(0x8899bb), 0);
+        lv_obj_set_style_text_font(music_artist_label_, GetTextFont(), 0);
+        
+        // ===== Progress bar (wide, thick, neon glow) =====
+        music_progress_bar_ = lv_bar_create(music_panel_);
+        lv_obj_set_size(music_progress_bar_, 200, 10);
+        lv_obj_align(music_progress_bar_, LV_ALIGN_TOP_MID, 0, 156);
+        lv_bar_set_range(music_progress_bar_, 0, 100);
+        lv_bar_set_value(music_progress_bar_, 0, LV_ANIM_OFF);
+        // Track background
+        lv_obj_set_style_bg_color(music_progress_bar_, lv_color_hex(0x1a1a3e), 0);
+        lv_obj_set_style_bg_opa(music_progress_bar_, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(music_progress_bar_, 5, 0);
+        // Indicator (neon pink with glow)
+        lv_obj_set_style_bg_color(music_progress_bar_, lv_color_hex(0xff1493), LV_PART_INDICATOR);
+        lv_obj_set_style_bg_grad_color(music_progress_bar_, lv_color_hex(0xff69b4), LV_PART_INDICATOR);
+        lv_obj_set_style_bg_grad_dir(music_progress_bar_, LV_GRAD_DIR_HOR, LV_PART_INDICATOR);
+        lv_obj_set_style_radius(music_progress_bar_, 5, LV_PART_INDICATOR);
+        lv_obj_set_style_shadow_color(music_progress_bar_, lv_color_hex(0xff1493), LV_PART_INDICATOR);
+        lv_obj_set_style_shadow_width(music_progress_bar_, 8, LV_PART_INDICATOR);
+        lv_obj_set_style_shadow_spread(music_progress_bar_, 2, LV_PART_INDICATOR);
+        lv_obj_set_style_shadow_opa(music_progress_bar_, LV_OPA_50, LV_PART_INDICATOR);
+        
+        // ===== Track number / lyrics label =====
+        // Use theme font for Vietnamese/Chinese support in lyrics
+        music_track_label_ = lv_label_create(music_panel_);
+        lv_label_set_text(music_track_label_, "");
+        lv_obj_set_width(music_track_label_, 210);
+        lv_obj_align(music_track_label_, LV_ALIGN_TOP_MID, 0, 176);
+        lv_label_set_long_mode(music_track_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+        lv_obj_set_style_text_align(music_track_label_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(music_track_label_, lv_color_hex(0x6677aa), 0);
+        lv_obj_set_style_text_font(music_track_label_, GetTextFont(), 0);
+        
+        // ===== Spectrum bars (music visualizer) =====
+        // Colors cycling through neon spectrum
+        const uint32_t bar_colors[] = {
+            0xFF1493, 0xFF69B4, 0x00FF88, 0x00FFFF, 
+            0x7B68EE, 0xFF6B6B, 0xFFD700, 0x00CED1,
+            0xFF1493, 0xFF69B4, 0x00FF88, 0x00FFFF
+        };
+        for (int i = 0; i < SPECTRUM_BAR_COUNT; i++) {
+            spectrum_bars_[i] = lv_obj_create(music_panel_);
+            lv_obj_set_size(spectrum_bars_[i], 10, 20);  // Initial height
+            lv_obj_align(spectrum_bars_[i], LV_ALIGN_BOTTOM_MID, 
+                        (i - SPECTRUM_BAR_COUNT/2) * 16 + 8, -10);
+            lv_obj_set_style_bg_color(spectrum_bars_[i], lv_color_hex(bar_colors[i]), 0);
+            lv_obj_set_style_bg_opa(spectrum_bars_[i], LV_OPA_90, 0);
+            lv_obj_set_style_border_width(spectrum_bars_[i], 0, 0);
+            lv_obj_set_style_radius(spectrum_bars_[i], 3, 0);
+            lv_obj_set_style_shadow_color(spectrum_bars_[i], lv_color_hex(bar_colors[i]), 0);
+            lv_obj_set_style_shadow_width(spectrum_bars_[i], 8, 0);
+            lv_obj_set_style_shadow_spread(spectrum_bars_[i], 2, 0);
+            lv_obj_set_style_shadow_opa(spectrum_bars_[i], LV_OPA_60, 0);
+            spectrum_heights_[i] = 20;
+        }
+        
+        // Initially hidden
+        lv_obj_add_flag(music_panel_, LV_OBJ_FLAG_HIDDEN);
+        music_display_visible_ = false;
+        
+        lvgl_port_unlock();
+    }
+
+    void CreateVolumePopup() {
+        if (volume_popup_) return;  // Already created
+        
+        lvgl_port_lock(0);
+        auto screen = lv_screen_active();
+        
+        // ===== Volume popup container =====
+        volume_popup_ = lv_obj_create(screen);
+        lv_obj_set_size(volume_popup_, 180, 70);
+        lv_obj_align(volume_popup_, LV_ALIGN_TOP_MID, 0, 40);
+        // Semi-transparent dark background
+        lv_obj_set_style_bg_color(volume_popup_, lv_color_hex(0x1a1a2e), 0);
+        lv_obj_set_style_bg_opa(volume_popup_, LV_OPA_90, 0);
+        lv_obj_set_style_border_color(volume_popup_, lv_color_hex(0x3498db), 0);
+        lv_obj_set_style_border_width(volume_popup_, 2, 0);
+        lv_obj_set_style_border_opa(volume_popup_, LV_OPA_70, 0);
+        lv_obj_set_style_radius(volume_popup_, 12, 0);
+        lv_obj_set_style_pad_all(volume_popup_, 8, 0);
+        lv_obj_set_scrollbar_mode(volume_popup_, LV_SCROLLBAR_MODE_OFF);
+        // Shadow for depth
+        lv_obj_set_style_shadow_color(volume_popup_, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_shadow_width(volume_popup_, 15, 0);
+        lv_obj_set_style_shadow_spread(volume_popup_, 2, 0);
+        lv_obj_set_style_shadow_opa(volume_popup_, LV_OPA_50, 0);
+        
+        // ===== Volume icon =====
+        volume_icon_label_ = lv_label_create(volume_popup_);
+        lv_label_set_text(volume_icon_label_, LV_SYMBOL_VOLUME_MAX);
+        lv_obj_align(volume_icon_label_, LV_ALIGN_TOP_LEFT, 4, 4);
+        lv_obj_set_style_text_color(volume_icon_label_, lv_color_hex(0x3498db), 0);
+        lv_obj_set_style_text_font(volume_icon_label_, &lv_font_montserrat_14, 0);
+        
+        // ===== Volume value label =====
+        volume_value_label_ = lv_label_create(volume_popup_);
+        lv_label_set_text(volume_value_label_, "70%");
+        lv_obj_align(volume_value_label_, LV_ALIGN_TOP_RIGHT, -4, 4);
+        lv_obj_set_style_text_color(volume_value_label_, lv_color_hex(0xecf0f1), 0);
+        lv_obj_set_style_text_font(volume_value_label_, &lv_font_montserrat_14, 0);
+        
+        // ===== Volume progress bar =====
+        volume_bar_ = lv_bar_create(volume_popup_);
+        lv_obj_set_size(volume_bar_, 160, 14);
+        lv_obj_align(volume_bar_, LV_ALIGN_BOTTOM_MID, 0, -4);
+        lv_bar_set_range(volume_bar_, 0, 100);
+        lv_bar_set_value(volume_bar_, 70, LV_ANIM_OFF);
+        // Track background
+        lv_obj_set_style_bg_color(volume_bar_, lv_color_hex(0x2c3e50), 0);
+        lv_obj_set_style_bg_opa(volume_bar_, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(volume_bar_, 7, 0);
+        // Indicator
+        lv_obj_set_style_bg_color(volume_bar_, lv_color_hex(0x3498db), LV_PART_INDICATOR);
+        lv_obj_set_style_bg_grad_color(volume_bar_, lv_color_hex(0x2ecc71), LV_PART_INDICATOR);
+        lv_obj_set_style_bg_grad_dir(volume_bar_, LV_GRAD_DIR_HOR, LV_PART_INDICATOR);
+        lv_obj_set_style_radius(volume_bar_, 7, LV_PART_INDICATOR);
+        
+        // Initially hidden
+        lv_obj_add_flag(volume_popup_, LV_OBJ_FLAG_HIDDEN);
+        
+        // Create timer for auto-hide
+        esp_timer_create_args_t timer_args = {};
+        timer_args.callback = [](void* arg) {
+            auto* self = static_cast<XINGZHI_CUBE_1_54TFT_WIFI*>(arg);
+            if (self->volume_popup_) {
+                lvgl_port_lock(0);
+                lv_obj_add_flag(self->volume_popup_, LV_OBJ_FLAG_HIDDEN);
+                lvgl_port_unlock();
+            }
+        };
+        timer_args.arg = this;
+        timer_args.name = "vol_popup";
+        esp_timer_create(&timer_args, &volume_popup_timer_);
+        
+        lvgl_port_unlock();
+    }
+
+    void ShowVolumePopup(int volume) {
+        if (!volume_popup_) {
+            CreateVolumePopup();
+        }
+        if (!volume_popup_) return;
+        
+        lvgl_port_lock(0);
+        
+        // Update icon based on volume level
+        if (volume == 0) {
+            lv_label_set_text(volume_icon_label_, LV_SYMBOL_MUTE);
+            lv_obj_set_style_text_color(volume_icon_label_, lv_color_hex(0xe74c3c), 0);
+        } else if (volume < 30) {
+            lv_label_set_text(volume_icon_label_, LV_SYMBOL_VOLUME_MID);
+            lv_obj_set_style_text_color(volume_icon_label_, lv_color_hex(0xf39c12), 0);
+        } else {
+            lv_label_set_text(volume_icon_label_, LV_SYMBOL_VOLUME_MAX);
+            lv_obj_set_style_text_color(volume_icon_label_, lv_color_hex(0x3498db), 0);
+        }
+        
+        // Update value label
+        char vol_str[8];
+        snprintf(vol_str, sizeof(vol_str), "%d%%", volume);
+        lv_label_set_text(volume_value_label_, vol_str);
+        
+        // Update progress bar with animation
+        lv_bar_set_value(volume_bar_, volume, LV_ANIM_ON);
+        
+        // Update bar color based on volume
+        if (volume == 0) {
+            lv_obj_set_style_bg_color(volume_bar_, lv_color_hex(0xe74c3c), LV_PART_INDICATOR);
+            lv_obj_set_style_bg_grad_color(volume_bar_, lv_color_hex(0xc0392b), LV_PART_INDICATOR);
+        } else if (volume >= 80) {
+            lv_obj_set_style_bg_color(volume_bar_, lv_color_hex(0x2ecc71), LV_PART_INDICATOR);
+            lv_obj_set_style_bg_grad_color(volume_bar_, lv_color_hex(0x27ae60), LV_PART_INDICATOR);
+        } else {
+            lv_obj_set_style_bg_color(volume_bar_, lv_color_hex(0x3498db), LV_PART_INDICATOR);
+            lv_obj_set_style_bg_grad_color(volume_bar_, lv_color_hex(0x2ecc71), LV_PART_INDICATOR);
+        }
+        
+        // Show popup
+        lv_obj_remove_flag(volume_popup_, LV_OBJ_FLAG_HIDDEN);
+        
+        lvgl_port_unlock();
+        
+        // Reset and start auto-hide timer (2 seconds)
+        esp_timer_stop(volume_popup_timer_);
+        esp_timer_start_once(volume_popup_timer_, 2000000);  // 2 seconds
+    }
+
+    void ShowMusicDisplay(bool show) {
+        if (!music_panel_) return;
+        if (show == music_display_visible_) return;
+        
+        lvgl_port_lock(0);
+        if (show) {
+            lv_obj_remove_flag(music_panel_, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(music_panel_, LV_OBJ_FLAG_HIDDEN);
+        }
+        lvgl_port_unlock();
+        music_display_visible_ = show;
+    }
+
+    void UpdateMusicDisplay() {
+        if (!music_panel_) return;
+        
+        bool any_playing = false;
+        
+        // Check SD player
+        if (mp3_player_ && mp3_player_->GetState() != Mp3PlayerState::STOPPED) {
+            any_playing = true;
+            lvgl_port_lock(0);
+            
+            // Title
+            std::string track = mp3_player_->GetCurrentTrack();
+            size_t pos = track.find_last_of("/");
+            std::string name = (pos != std::string::npos) ? track.substr(pos + 1) : track;
+            // Remove .mp3 extension
+            size_t ext = name.find_last_of(".");
+            if (ext != std::string::npos) name = name.substr(0, ext);
+            lv_label_set_text(music_title_label_, name.c_str());
+            
+            // State
+            if (mp3_player_->GetState() == Mp3PlayerState::PLAYING) {
+                lv_label_set_text(music_state_label_, LV_SYMBOL_PLAY " SD Card");
+                lv_obj_set_style_text_color(music_state_label_, lv_color_hex(0x2ecc71), 0);
+            } else if (mp3_player_->GetState() == Mp3PlayerState::PAUSED) {
+                lv_label_set_text(music_state_label_, LV_SYMBOL_PAUSE " Paused");
+                lv_obj_set_style_text_color(music_state_label_, lv_color_hex(0xf39c12), 0);
+            }
+            
+            // Artist = folder name
+            size_t folder_end = track.find_last_of("/");
+            std::string folder = "";
+            if (folder_end != std::string::npos && folder_end > 0) {
+                size_t folder_start = track.find_last_of("/", folder_end - 1);
+                if (folder_start != std::string::npos) {
+                    folder = track.substr(folder_start + 1, folder_end - folder_start - 1);
+                }
+            }
+            lv_label_set_text(music_artist_label_, folder.c_str());
+            
+            // Track number
+            char track_info[32];
+            snprintf(track_info, sizeof(track_info), "%d / %d", 
+                     mp3_player_->GetCurrentIndex() + 1, mp3_player_->GetPlaylistSize());
+            lv_label_set_text(music_track_label_, track_info);
+            
+            // Progress bar (estimated)
+            if (mp3_player_->GetPlaylistSize() > 0) {
+                int progress = ((mp3_player_->GetCurrentIndex()) * 100) / mp3_player_->GetPlaylistSize();
+                lv_bar_set_value(music_progress_bar_, progress, LV_ANIM_ON);
+            }
+            
+            // Animate spectrum bars
+            UpdateSpectrumBars(mp3_player_->GetState() == Mp3PlayerState::PLAYING);
+            
+            lvgl_port_unlock();
+        }
+        
+        // Check stream player
+        int stream_state = StreamPlayer_GetState();
+        if (stream_state >= 1 && stream_state <= 3) {  // SEARCHING, BUFFERING, PLAYING
+            any_playing = true;
+            lvgl_port_lock(0);
+            
+            const char* title = StreamPlayer_GetTitle();
+            const char* artist = StreamPlayer_GetArtist();
+            
+            if (title && strlen(title) > 0) {
+                lv_label_set_text(music_title_label_, title);
+            } else {
+                lv_label_set_text(music_title_label_, "Searching...");
+            }
+            
+            if (artist && strlen(artist) > 0) {
+                lv_label_set_text(music_artist_label_, artist);
+            } else {
+                lv_label_set_text(music_artist_label_, "Online Stream");
+            }
+            
+            // State
+            if (stream_state == 1) {
+                lv_label_set_text(music_state_label_, LV_SYMBOL_REFRESH " Searching...");
+                lv_obj_set_style_text_color(music_state_label_, lv_color_hex(0x3498db), 0);
+            } else if (stream_state == 2) {
+                lv_label_set_text(music_state_label_, LV_SYMBOL_DOWNLOAD " Buffering...");
+                lv_obj_set_style_text_color(music_state_label_, lv_color_hex(0xf39c12), 0);
+            } else if (stream_state == 3) {
+                lv_label_set_text(music_state_label_, LV_SYMBOL_PLAY " Streaming");
+                lv_obj_set_style_text_color(music_state_label_, lv_color_hex(0x2ecc71), 0);
+            }
+            
+            // Lyrics as track info
+            const char* lyric = StreamPlayer_GetCurrentLyricText();
+            if (lyric && strlen(lyric) > 0) {
+                lv_label_set_text(music_track_label_, lyric);
+            } else {
+                lv_label_set_text(music_track_label_, "");
+            }
+            
+            // Progress based on play time (estimate 4 min song)
+            int64_t play_ms = StreamPlayer_GetPlayTimeMs();
+            int progress = (int)((play_ms % 240000) * 100 / 240000);
+            lv_bar_set_value(music_progress_bar_, progress, LV_ANIM_ON);
+            
+            // Animate spectrum bars
+            UpdateSpectrumBars(stream_state == 3);  // PLAYING state
+            
+            lvgl_port_unlock();
+        }
+        
+        ShowMusicDisplay(any_playing);
+        
+        // ====== Auto LED music mode & Power save ======
+        if (any_playing && !music_led_active_) {
+            // Save current LED state before switching
+            led_state_t* led = get_led_state();
+            led_saved_before_music_ = *led;
+            music_led_active_ = true;
+            
+            if (g_music_power_save.load()) {
+                // Power save: turn off LED, dim display
+                ninja_led_off();
+                GetBacklight()->SetBrightness(1);
+                g_music_power_save_applied.store(true);
+                ESP_LOGI(TAG, "Music power save: LED off, display dimmed");
+            } else {
+                // Auto switch to MUSIC_REACTIVE mode
+                ninja_led_set_mode(LED_MODE_MUSIC_REACTIVE);
+                ESP_LOGI(TAG, "Auto LED: switched to MUSIC_REACTIVE");
+            }
+        } else if (any_playing && music_led_active_) {
+            // Check if power save mode toggled while playing
+            bool ps = g_music_power_save.load();
+            bool ps_applied = g_music_power_save_applied.load();
+            if (ps && !ps_applied) {
+                // Just enabled power save -> turn off LED, dim display
+                ninja_led_off();
+                GetBacklight()->SetBrightness(1);
+                g_music_power_save_applied.store(true);
+            } else if (!ps && ps_applied) {
+                // Just disabled power save -> switch to MUSIC_REACTIVE
+                ninja_led_set_mode(LED_MODE_MUSIC_REACTIVE);
+                GetBacklight()->RestoreBrightness();
+                g_music_power_save_applied.store(false);
+            }
+        } else if (!any_playing && music_led_active_) {
+            // Music stopped -> restore previous LED state
+            led_state_t* led = get_led_state();
+            *led = led_saved_before_music_;
+            ninja_led_update();
+            music_led_active_ = false;
+            if (g_music_power_save_applied.load()) {
+                GetBacklight()->RestoreBrightness();
+                g_music_power_save_applied.store(false);
+            }
+            ESP_LOGI(TAG, "Auto LED: restored previous state");
+        }
+    }
+
+    static void MusicDisplayTimerCallback(void* arg) {
+        auto* self = static_cast<XINGZHI_CUBE_1_54TFT_WIFI*>(arg);
+        self->UpdateMusicDisplay();
+    }
+
+    void StartMusicDisplayTimer() {
+        if (music_display_timer_) return;
+        
+        esp_timer_create_args_t timer_args = {};
+        timer_args.callback = MusicDisplayTimerCallback;
+        timer_args.arg = this;
+        timer_args.name = "music_disp";
+        esp_timer_create(&timer_args, &music_display_timer_);
+        esp_timer_start_periodic(music_display_timer_, 500000);  // 500ms interval
+    }
 
     void InitializePowerManager() {
         power_manager_ = new PowerManager(GPIO_NUM_38);
@@ -67,7 +671,21 @@ private:
         // rtc_gpio_set_direction(GPIO_NUM_21, RTC_GPIO_MODE_OUTPUT_ONLY);
         // rtc_gpio_set_level(GPIO_NUM_21, 1);
 
-        power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
+        // Load saved sleep config from NVS (defaults: sleep=60s, shutdown=300s)
+        int sleep_sec = 60, shutdown_sec = 300;
+        {
+            nvs_handle_t handle;
+            if (nvs_open("sleep_cfg", NVS_READONLY, &handle) == ESP_OK) {
+                int32_t val;
+                if (nvs_get_i32(handle, "sleep_s", &val) == ESP_OK) sleep_sec = val;
+                if (nvs_get_i32(handle, "shut_s", &val) == ESP_OK) shutdown_sec = val;
+                nvs_close(handle);
+                ESP_LOGI(TAG, "Loaded sleep config: sleep=%ds, shutdown=%ds", sleep_sec, shutdown_sec);
+            }
+        }
+
+        power_save_timer_ = new PowerSaveTimer(-1, sleep_sec, shutdown_sec);
+        g_pst_ptr = power_save_timer_;  // Expose to C interface
         power_save_timer_->OnEnterSleepMode([this]() {
             GetDisplay()->SetPowerSaveMode(true);
             GetBacklight()->SetBrightness(1);
@@ -102,6 +720,15 @@ private:
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             power_save_timer_->WakeUp();
+            
+            // Check if streaming music - single click stops it
+            int stream_state = StreamPlayer_GetState();
+            if (stream_state == 2 || stream_state == 3) {  // BUFFERING=2 or PLAYING=3
+                ESP_LOGI(TAG, "Boot button: stopping streaming music");
+                StreamPlayer_Stop();
+                GetDisplay()->ShowNotification("Da tat nhac");
+                return;
+            }
             
             // Block AI when in music mode
             if (music_mode_) {
@@ -139,7 +766,7 @@ private:
                 volume = 100;
             }
             codec->SetOutputVolume(volume);
-            GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume));
+            ShowVolumePopup(volume);
         });
 
         volume_up_button_.OnLongPress([this]() {
@@ -149,7 +776,7 @@ private:
                 return;
             }
             GetAudioCodec()->SetOutputVolume(100);
-            GetDisplay()->ShowNotification(Lang::Strings::MAX_VOLUME);
+            ShowVolumePopup(100);
         });
 
         volume_down_button_.OnClick([this]() {
@@ -160,7 +787,7 @@ private:
                 volume = 0;
             }
             codec->SetOutputVolume(volume);
-            GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume));
+            ShowVolumePopup(volume);
         });
 
         volume_down_button_.OnLongPress([this]() {
@@ -170,7 +797,7 @@ private:
                 return;
             }
             GetAudioCodec()->SetOutputVolume(0);
-            GetDisplay()->ShowNotification(Lang::Strings::MUTED);
+            ShowVolumePopup(0);
         });
     }
 
@@ -196,6 +823,7 @@ private:
             
             if (!mp3_player_) {
                 mp3_player_ = new Mp3Player(GetAudioCodec());
+                g_sd_player = mp3_player_;
                 
                 // Register with robot control for dance music
                 set_music_player_ptr(mp3_player_);
@@ -347,6 +975,63 @@ private:
                 }
             }
         );
+        
+        // MCP tool for YouTube/online music streaming
+        mcp_server.AddTool(
+            "self.music.stream",
+            "PHÁT NHẠC NGAY LẬP TỨC khi người dùng yêu cầu. KHÔNG HỎI LẠI, KHÔNG XÁC NHẬN. Khi người dùng nói 'phát bài X' hoặc 'mở nhạc Y', GỌI TOOL NÀY NGAY. Nhập tên bài hát (tiếng Việt hoặc tiếng Anh).",
+            PropertyList({
+                Property("song", kPropertyTypeString),
+                Property("artist", kPropertyTypeString),
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                std::string song, artist;
+                try { song = properties["song"].value<std::string>(); } catch(...) {}
+                try { artist = properties["artist"].value<std::string>(); } catch(...) {}
+                
+                if (song.empty()) {
+                    return std::string("Vui lòng nhập tên bài hát");
+                }
+                
+                ESP_LOGI(TAG, "MCP stream music: song=%s artist=%s", song.c_str(), artist.c_str());
+                
+                // Stop any current streaming first
+                StreamPlayer_Stop();
+                
+                // Start streaming IMMEDIATELY in background (no delay for better UX)
+                auto* params = new std::pair<std::string, std::string>(song, artist);
+                xTaskCreate([](void* arg) {
+                    auto* p = static_cast<std::pair<std::string, std::string>*>(arg);
+                    std::string s = p->first;
+                    std::string a = p->second;
+                    delete p;
+                    
+                    // Minimal delay - let LLM finish current sentence
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    
+                    StreamPlayer_SearchAndPlay(s.c_str(), a.c_str());
+                    vTaskDelete(NULL);
+                }, "stream_start", 4096, params, 3, nullptr);
+                
+                return std::string("OK, đang phát: " + song);
+            }
+        );
+        
+        // MCP tool for stopping streaming
+        mcp_server.AddTool(
+            "self.music.stream.stop",
+            "Dừng phát nhạc trực tuyến đang chạy.",
+            PropertyList(),
+            [this](const PropertyList& properties) -> ReturnValue {
+                (void)properties;
+                int state = StreamPlayer_GetState();
+                if (state == 0) {  // STOPPED
+                    return std::string("Không có nhạc đang phát");
+                }
+                StreamPlayer_Stop();
+                return std::string("Đã dừng phát nhạc");
+            }
+        );
     }
 
     void InitializeSdCard() {
@@ -386,9 +1071,11 @@ private:
             sdmmc_card_print_info(stdout, card);
             ESP_LOGI(TAG, "SD card mounted at %s", SDCARD_MOUNT_POINT);
             sd_card_mounted_ = true;
+            g_sd_mounted = true;
         } else {
             ESP_LOGW(TAG, "Failed to mount SD card: %s", esp_err_to_name(ret));
             sd_card_mounted_ = false;
+            g_sd_mounted = false;
         }
 #else
         ESP_LOGI(TAG, "SD card disabled");
@@ -412,6 +1099,9 @@ public:
         RegisterWifiEventHandler();
         SetupNetworkCallback();
         GetBacklight()->RestoreBrightness();
+        // Create music display overlay and start periodic update timer
+        CreateMusicDisplay();
+        StartMusicDisplayTimer();
     }
 
     void InitializeRobotControl() {
@@ -444,6 +1134,30 @@ public:
         robot_webserver_ = webserver_start();
         if (robot_webserver_) {
             ESP_LOGI(TAG, "Robot webserver started on port 80");
+            // Initialize stream player for music streaming
+            StreamPlayer_Init(GetAudioCodec());
+            // Initialize SD player for web UI access
+            if (sd_card_mounted_ && !mp3_player_) {
+                mp3_player_ = new Mp3Player(GetAudioCodec());
+                g_sd_player = mp3_player_;
+                set_music_player_ptr(mp3_player_);
+                mp3_player_->OnTrackChanged([this](const std::string& track) {
+                    size_t pos = track.find_last_of("/");
+                    std::string name = (pos != std::string::npos) ? track.substr(pos + 1) : track;
+                    GetDisplay()->ShowNotification(name);
+                });
+                mp3_player_->OnPlaybackFinished([this]() {
+                    // Auto-play next when finished
+                    vTaskDelay(pdMS_TO_TICKS(300));
+                    if (mp3_player_) mp3_player_->Next();
+                });
+                mp3_player_->OnError([this](const std::string& error) {
+                    ESP_LOGE(TAG, "SD Music error: %s", error.c_str());
+                });
+                // Pre-scan playlist
+                mp3_player_->ScanDirectory(SDCARD_MOUNT_POINT);
+                ESP_LOGI(TAG, "SD player ready: %d files", mp3_player_->GetPlaylistSize());
+            }
         }
     }
 
@@ -512,6 +1226,15 @@ public:
         return &audio_codec;
     }
 
+    virtual bool IsMusicPlaying() override {
+        // Check SD card player
+        if (mp3_player_ && mp3_player_->GetState() != Mp3PlayerState::STOPPED) return true;
+        // Check streaming player  
+        int stream_state = StreamPlayer_GetState();
+        if (stream_state == 2 || stream_state == 3) return true;  // BUFFERING or PLAYING
+        return false;
+    }
+
     virtual Display* GetDisplay() override {
         return display_;
     }
@@ -558,5 +1281,157 @@ extern "C" {
         mp3_player->Stop();
     }
 }
+
+// ====== SD Player C interface for webserver ======
+
+extern "C" {
+
+void SdPlayer_Init(void) {
+    // Called from board constructor after SD init
+    // g_sd_player set by board code
+}
+
+int SdPlayer_Play(const char* filepath) {
+    if (!g_sd_player) return 0;
+    
+    // Abort any ongoing TTS before playing music
+    auto& app = Application::GetInstance();
+    auto state = app.GetDeviceState();
+    if (state == kDeviceStateSpeaking) {
+        app.AbortSpeaking(kAbortReasonNone);
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    // Also stop streaming if active
+    StreamPlayer_Stop();
+    
+    return g_sd_player->Play(std::string(filepath)) ? 1 : 0;
+}
+
+void SdPlayer_Stop(void) {
+    if (g_sd_player) g_sd_player->Stop();
+}
+
+void SdPlayer_Pause(void) {
+    if (g_sd_player) g_sd_player->Pause();
+}
+
+void SdPlayer_Resume(void) {
+    if (g_sd_player) g_sd_player->Resume();
+}
+
+void SdPlayer_Next(void) {
+    if (!g_sd_player) return;
+    // Abort TTS
+    auto& app = Application::GetInstance();
+    if (app.GetDeviceState() == kDeviceStateSpeaking) {
+        app.AbortSpeaking(kAbortReasonNone);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    StreamPlayer_Stop();
+    g_sd_player->Next();
+}
+
+void SdPlayer_Previous(void) {
+    if (!g_sd_player) return;
+    auto& app = Application::GetInstance();
+    if (app.GetDeviceState() == kDeviceStateSpeaking) {
+        app.AbortSpeaking(kAbortReasonNone);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    StreamPlayer_Stop();
+    g_sd_player->Previous();
+}
+
+int SdPlayer_GetState(void) {
+    if (!g_sd_player) return 0;
+    return static_cast<int>(g_sd_player->GetState());
+}
+
+const char* SdPlayer_GetCurrentTrack(void) {
+    if (!g_sd_player) return "";
+    static std::string s_track;
+    s_track = g_sd_player->GetCurrentTrack();
+    return s_track.c_str();
+}
+
+int SdPlayer_GetCurrentIndex(void) {
+    if (!g_sd_player) return -1;
+    return g_sd_player->GetCurrentIndex();
+}
+
+int SdPlayer_GetPlaylistSize(void) {
+    if (!g_sd_player) return 0;
+    return g_sd_player->GetPlaylistSize();
+}
+
+int SdPlayer_ListDir(const char* path, sd_file_entry_t* out_entries, int max_entries) {
+    if (!g_sd_mounted || !out_entries || max_entries <= 0) return 0;
+    
+    DIR* dir = opendir(path);
+    if (!dir) return 0;
+    
+    int count = 0;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr && count < max_entries) {
+        if (entry->d_name[0] == '.') continue;
+        
+        char full_path[512];
+        snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
+        
+        struct stat st;
+        if (stat(full_path, &st) != 0) continue;
+        
+        strncpy(out_entries[count].name, entry->d_name, sizeof(out_entries[count].name) - 1);
+        out_entries[count].name[sizeof(out_entries[count].name) - 1] = '\0';
+        strncpy(out_entries[count].path, full_path, sizeof(out_entries[count].path) - 1);
+        out_entries[count].path[sizeof(out_entries[count].path) - 1] = '\0';
+        out_entries[count].is_dir = S_ISDIR(st.st_mode) ? 1 : 0;
+        out_entries[count].size = (long)st.st_size;
+        count++;
+    }
+    closedir(dir);
+    return count;
+}
+
+int SdPlayer_IsSdMounted(void) {
+    return g_sd_mounted ? 1 : 0;
+}
+
+const char* SdPlayer_GetPlaylistEntry(int index) {
+    if (!g_sd_player || index < 0 || index >= g_sd_player->GetPlaylistSize()) return NULL;
+    if (!g_playlist_cache) return NULL;
+    if (index >= (int)g_playlist_cache->size()) return NULL;
+    return (*g_playlist_cache)[index].c_str();
+}
+
+int SdPlayer_ScanAndBuildPlaylist(const char* path) {
+    if (!g_sd_player || !g_sd_mounted) return 0;
+    int count = g_sd_player->ScanDirectory(std::string(path));
+    return count;
+}
+
+int SdPlayer_IsAnyMusicPlaying(void) {
+    // Check SD player
+    if (g_sd_player && g_sd_player->GetState() != Mp3PlayerState::STOPPED) return 1;
+    // Check stream player
+    int stream_state = StreamPlayer_GetState();
+    if (stream_state == 2 || stream_state == 3) return 1;  // BUFFERING or PLAYING
+    return 0;
+}
+
+void SdPlayer_SetRepeatMode(int mode) {
+    if (g_sd_player) {
+        g_sd_player->SetRepeatMode(static_cast<Mp3RepeatMode>(mode));
+    }
+}
+
+int SdPlayer_GetRepeatMode(void) {
+    if (g_sd_player) {
+        return static_cast<int>(g_sd_player->GetRepeatMode());
+    }
+    return 0;
+}
+
+} // extern "C"
 
 DECLARE_BOARD(XINGZHI_CUBE_1_54TFT_WIFI);
