@@ -536,8 +536,16 @@ static const char html_content[] =
 "</div>"
 "<hr style=\"border-color:#34495e;margin:12px 0\">"
 "<h3 style=\"color:#2ecc71;font-size:0.9em;margin-bottom:8px\">Upload MP3</h3>"
-"<div style=\"display:flex;gap:6px;margin-bottom:8px;align-items:center\">"
-"<input type=\"file\" id=\"sdFileInput\" accept=\".mp3,.wav,.ogg,.flac\" multiple style=\"flex:1;font-size:0.75em;color:#ecf0f1;background:#2c3e50;border:1px solid #7f8c8d;border-radius:4px;padding:6px\">"
+"<div id=\"sdDropZone\" style=\"border:2px dashed #7f8c8d;border-radius:8px;padding:12px;margin-bottom:8px;text-align:center;cursor:pointer;background:#1a252f;transition:all 0.3s\">"
+"<div style=\"color:#7f8c8d;font-size:0.8em;margin-bottom:6px\">📁 Kéo thả file hoặc chọn file</div>"
+"<input type=\"file\" id=\"sdFileInput\" accept=\".mp3,.wav,.ogg,.flac\" multiple style=\"width:100%;font-size:0.75em;color:#ecf0f1;background:#2c3e50;border:1px solid #7f8c8d;border-radius:4px;padding:6px\">"
+"</div>"
+"<div id=\"sdFileListContainer\" style=\"display:none;background:#2c3e50;border-radius:8px;padding:8px;margin-bottom:8px\">"
+"<div style=\"display:flex;justify-content:space-between;align-items:center;margin-bottom:6px\">"
+"<div id=\"sdFileCount\" style=\"color:#2ecc71;font-size:0.8em;font-weight:bold\">0 file</div>"
+"<button onclick=\"sdClearFiles()\" style=\"background:#e74c3c;color:#fff;border:none;border-radius:4px;padding:4px 8px;font-size:0.7em;cursor:pointer\">Xóa tất cả</button>"
+"</div>"
+"<div id=\"sdFileItems\" style=\"max-height:150px;overflow-y:auto\"></div>"
 "</div>"
 "<button class=\"btn\" style=\"background:#2ecc71;width:100%;font-size:0.85em;padding:10px;margin-bottom:6px\" id=\"btnSdUpload\">Upload</button>"
 "<div id=\"sdUploadProgress\" style=\"display:none;background:#2c3e50;border-radius:8px;padding:8px;margin-bottom:8px\">"
@@ -1037,11 +1045,11 @@ static const char html_content[] =
 "let sdUploadQueue=[];"
 "function fmtSz(b){return b>1048576?(b/1048576).toFixed(1)+' MB':b>1024?(b/1024).toFixed(0)+' KB':b+' B';}"
 "function sdUpdateFileList(){"
-"const fl=document.getElementById('sdFileList');"
+"const container=document.getElementById('sdFileListContainer');"
 "const items=document.getElementById('sdFileItems');"
 "const cnt=document.getElementById('sdFileCount');"
-"if(!sdUploadQueue.length){fl.style.display='none';return;}"
-"fl.style.display='block';"
+"if(!sdUploadQueue.length){container.style.display='none';return;}"
+"container.style.display='block';"
 "let total=0;sdUploadQueue.forEach(f=>total+=f.size);"
 "cnt.textContent=sdUploadQueue.length+' file - '+fmtSz(total);"
 "let h='';sdUploadQueue.forEach((f,i)=>{"
@@ -1055,22 +1063,27 @@ static const char html_content[] =
 "function sdRemoveFile(i){sdUploadQueue.splice(i,1);sdUpdateFileList();}"
 "function sdClearFiles(){sdUploadQueue=[];sdUpdateFileList();document.getElementById('sdFileInput').value='';}"
 "function sdAddFiles(fileList){"
+"console.log('sdAddFiles called with', fileList.length, 'files');"
 "for(let i=0;i<fileList.length;i++){"
 "const f=fileList[i];"
-"if(!sdUploadQueue.some(q=>q.name===f.name&&q.size===f.size)){sdUploadQueue.push(f);}"
+"if(!sdUploadQueue.some(q=>q.name===f.name&&q.size===f.size)){sdUploadQueue.push(f);console.log('Added to queue:', f.name, fmtSz(f.size));}"
+"else{console.log('Skipped duplicate:', f.name);}"
 "}"
 "sdUpdateFileList();"
+"console.log('Total in queue:', sdUploadQueue.length);"
 "}"
 "document.getElementById('sdFileInput').onchange=function(){sdAddFiles(this.files);};"
+"document.getElementById('sdFileInput').onclick=(e)=>{e.stopPropagation();};"
 "const dz=document.getElementById('sdDropZone');"
+"dz.onclick=()=>{document.getElementById('sdFileInput').click();};"
 "dz.ondragover=(e)=>{e.preventDefault();dz.style.borderColor='#2ecc71';dz.style.background='rgba(46,204,113,0.08)';};"
-"dz.ondragleave=()=>{dz.style.borderColor='#7f8c8d';dz.style.background='';};"
-"dz.ondrop=(e)=>{e.preventDefault();dz.style.borderColor='#7f8c8d';dz.style.background='';if(e.dataTransfer.files.length)sdAddFiles(e.dataTransfer.files);};"
+"dz.ondragleave=()=>{dz.style.borderColor='#7f8c8d';dz.style.background='#1a252f';};"
+"dz.ondrop=(e)=>{e.preventDefault();dz.style.borderColor='#7f8c8d';dz.style.background='#1a252f';if(e.dataTransfer.files.length)sdAddFiles(e.dataTransfer.files);};"
 "function sdUploadFile(file,dest,barFile){"
 "return new Promise((resolve,reject)=>{"
 "const xhr=new XMLHttpRequest();"
 "xhr.upload.onprogress=(e)=>{if(e.lengthComputable){const pct=Math.round(e.loaded*100/e.total);barFile.style.width=pct+'%';}};"
-"xhr.onload=()=>{try{const d=JSON.parse(xhr.responseText);if(d.status==='ok'){resolve(d);}else{reject(d.error||'Server error');}}catch(ex){reject('Parse error');}};"
+"xhr.onload=()=>{try{const d=JSON.parse(xhr.responseText);if(d.status==='ok'){resolve(d);}else{const errMsg=d.detail?(d.error+': '+d.detail):d.error;reject(errMsg||'Server error');}}catch(ex){reject('Parse error: '+ex.message);};};"
 "xhr.onerror=()=>{reject('Loi ket noi');};"
 "xhr.ontimeout=()=>{reject('Timeout');};"
 "xhr.timeout=300000;"
@@ -1080,8 +1093,11 @@ static const char html_content[] =
 "});"
 "}"
 "document.getElementById('btnSdUpload').onclick=async()=>{"
+"try{"
+"console.log('Upload button clicked, queue length:', sdUploadQueue.length);"
 "if(!sdUploadQueue.length){alert('Chon file truoc!');return;}"
 "const files=[...sdUploadQueue];"
+"console.log('Starting upload of', files.length, 'files');"
 "const prog=document.getElementById('sdUploadProgress');"
 "const barAll=document.getElementById('sdUploadBar');"
 "const barFile=document.getElementById('sdUploadBarFile');"
@@ -1094,29 +1110,32 @@ static const char html_content[] =
 "for(let i=0;i<files.length;i++){"
 "const f=files[i];"
 "const dest=sdCurrentPath+'/'+f.name;"
+"console.log('Uploading file '+(i+1)+':', f.name, 'to', dest);"
 "txt.textContent='('+(i+1)+'/'+files.length+') '+f.name;"
 "ttl.textContent='Tong: '+fmtSz(doneBytes)+' / '+fmtSz(totalBytes);"
 "barFile.style.width='0%';"
 "barAll.style.width=Math.round(doneBytes*100/totalBytes)+'%';"
-"try{await sdUploadFile(f,dest,barFile);ok++;doneBytes+=f.size;}catch(e){txt.textContent='Loi: '+f.name+' - '+e;break;}"
+"try{await sdUploadFile(f,dest,barFile);ok++;doneBytes+=f.size;console.log('File uploaded OK:', f.name);}catch(e){console.error('Upload failed:', f.name, e);txt.textContent='Loi: '+f.name;txt.style.color='#e74c3c';const detail=document.createElement('div');detail.textContent=String(e);detail.style.cssText='color:#e74c3c;font-size:0.7em;margin-top:4px;word-break:break-word';if(txt.nextSibling)txt.parentNode.insertBefore(detail,txt.nextSibling);else txt.parentNode.appendChild(detail);break;}"
 "}"
 "barAll.style.width='100%';barFile.style.width='100%';"
 "ttl.textContent='Tong: '+fmtSz(totalBytes);"
-"if(ok===files.length){txt.textContent='Thanh cong! '+ok+' file ('+fmtSz(totalBytes)+')';}"
+"if(ok===files.length){txt.textContent='Thanh cong! '+ok+' file ('+fmtSz(totalBytes)+')';txt.style.color='#2ecc71';console.log('All uploads completed successfully');}"
 "sdUploadQueue=[];sdUpdateFileList();"
-"setTimeout(()=>{prog.style.display='none';barAll.style.width='0%';barFile.style.width='0%';},4000);"
+"setTimeout(()=>{prog.style.display='none';barAll.style.width='0%';barFile.style.width='0%';txt.style.color='#2ecc71';const detail=txt.nextSibling;if(detail&&detail.tagName==='DIV'&&detail.style.fontSize==='0.7em')detail.remove();},ok===files.length?4000:10000);"
 "sdLoadDir(sdCurrentPath);"
 "startSdPoll();"
 "document.getElementById('sdFileInput').value='';"
+"}catch(err){console.error('Upload handler error:', err);alert('Loi: '+err.message);}"
 "};"
 "/* SD Delete */"
 "document.getElementById('btnSdDeleteFile').onclick=()=>{"
 "if(!sdSelectedFile){document.getElementById('sdDeleteStatus').textContent='Chua chon file!';return;}"
 "if(!confirm('Xoa: '+sdSelectedFile+'?'))return;"
 "fetch('/sd_delete?path='+encodeURIComponent(sdSelectedFile)).then(r=>r.json()).then(d=>{"
-"document.getElementById('sdDeleteStatus').textContent=d.status==='ok'?'Da xoa!':'Loi: '+d.error;"
-"if(d.status==='ok'){sdSelectedFile=null;sdLoadDir(sdCurrentPath);}"
-"});};"
+"const status=document.getElementById('sdDeleteStatus');"
+"if(d.status==='ok'){status.textContent='Da xoa!';status.style.color='#2ecc71';sdSelectedFile=null;sdLoadDir(sdCurrentPath);}"
+"else{const errMsg=d.detail?(d.error+': '+d.detail):d.error;status.textContent='Loi: '+errMsg;status.style.color='#e74c3c';}"
+"}).catch(e=>{const status=document.getElementById('sdDeleteStatus');status.textContent='Loi ket noi';status.style.color='#e74c3c';});};"
 "/* Sleep Timer & Power Save */"
 "function loadSleepConfig(){"
 "fetch('/get_sleep_config').then(r=>r.json()).then(d=>{"
@@ -2499,18 +2518,20 @@ static esp_err_t sd_upload_handler(httpd_req_t *req) {
     
     // Validate path starts with /sdcard
     if (strncmp(filepath, "/sdcard", 7) != 0) {
-        ESP_LOGE(TAG, "SD upload: invalid path (not /sdcard)");
+        ESP_LOGE(TAG, "SD upload: invalid path (not /sdcard): %s", filepath);
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"Invalid path\"}");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"Invalid path\",\"detail\":\"Path must start with /sdcard\"}");
         return ESP_OK;
     }
     
     if (!SdPlayer_IsSdMounted()) {
         ESP_LOGE(TAG, "SD upload: SD not mounted");
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"SD not mounted\"}");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"SD not mounted\",\"detail\":\"Please insert SD card\"}");
         return ESP_OK;
     }
+    
+    ESP_LOGI(TAG, "SD upload starting: %s (size=%d)", filepath, req->content_len);
     
     int total_len = req->content_len;
     if (total_len <= 0) {
@@ -2526,14 +2547,19 @@ static esp_err_t sd_upload_handler(httpd_req_t *req) {
     // Open file for writing
     FILE *f = fopen(filepath, "wb");
     if (!f) {
-        ESP_LOGE(TAG, "SD upload: fopen failed for %s (errno=%d)", filepath, errno);
+        int err = errno;
+        ESP_LOGE(TAG, "SD upload: fopen failed for %s (errno=%d: %s)", filepath, err, strerror(err));
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"Cannot create file\"}");
+        char err_buf[256];
+        snprintf(err_buf, sizeof(err_buf), "{\"status\":\"error\",\"error\":\"Cannot create file\",\"detail\":\"%s\"}", strerror(err));
+        httpd_resp_sendstr(req, err_buf);
         return ESP_OK;
     }
+    ESP_LOGI(TAG, "SD upload: file opened successfully for writing");
     
     int received = 0;
-    char *buf = (char *)malloc(4096);
+    const int CHUNK_SIZE = 8192;  // 8KB buffer for better throughput
+    char *buf = (char *)malloc(CHUNK_SIZE);
     if (!buf) {
         fclose(f);
         remove(filepath);
@@ -2544,16 +2570,18 @@ static esp_err_t sd_upload_handler(httpd_req_t *req) {
     
     bool write_error = false;
     int timeout_count = 0;
+    int last_log_received = 0;
     while (received < total_len) {
-        int ret = httpd_req_recv(req, buf, 4096);
+        int ret = httpd_req_recv(req, buf, CHUNK_SIZE);
         if (ret <= 0) {
             if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
                 timeout_count++;
-                if (timeout_count > 10) {
+                if (timeout_count > 30) {  // Allow more retries for slow connections
                     ESP_LOGE(TAG, "SD upload: too many timeouts at %d/%d bytes", received, total_len);
                     write_error = true;
                     break;
                 }
+                ESP_LOGW(TAG, "SD upload: timeout #%d, retrying... (%d/%d bytes)", timeout_count, received, total_len);
                 continue;
             }
             ESP_LOGE(TAG, "SD upload: recv error %d at %d/%d bytes", ret, received, total_len);
@@ -2567,6 +2595,12 @@ static esp_err_t sd_upload_handler(httpd_req_t *req) {
             break;
         }
         received += ret;
+        
+        // Log progress every 100KB
+        if (received - last_log_received >= 102400) {
+            ESP_LOGI(TAG, "SD upload progress: %d/%d bytes (%.1f%%)", received, total_len, (received * 100.0 / total_len));
+            last_log_received = received;
+        }
     }
     
     free(buf);
@@ -2601,31 +2635,54 @@ static esp_err_t sd_delete_handler(httpd_req_t *req) {
     // URL decode the path
     url_decode_in_place(filepath);
     
+    ESP_LOGI(TAG, "SD delete request: %s", filepath);
+    
     if (strncmp(filepath, "/sdcard", 7) != 0) {
+        ESP_LOGE(TAG, "SD delete: invalid path (not /sdcard): %s", filepath);
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"Invalid path\"}");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"Invalid path\",\"detail\":\"Path must start with /sdcard\"}");
         return ESP_OK;
     }
     
     if (!SdPlayer_IsSdMounted()) {
+        ESP_LOGE(TAG, "SD delete: SD not mounted");
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"SD not mounted\"}");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"SD not mounted\",\"detail\":\"Please insert SD card\"}");
+        return ESP_OK;
+    }
+    
+    // Check if file exists
+    struct stat st;
+    if (stat(filepath, &st) != 0) {
+        int err = errno;
+        ESP_LOGE(TAG, "SD delete: file not found: %s (errno=%d: %s)", filepath, err, strerror(err));
+        httpd_resp_set_type(req, "application/json");
+        char err_buf[256];
+        snprintf(err_buf, sizeof(err_buf), "{\"status\":\"error\",\"error\":\"File not found\",\"detail\":\"%s\"}", strerror(err));
+        httpd_resp_sendstr(req, err_buf);
         return ESP_OK;
     }
     
     // Stop playback if deleting currently playing track
     const char* current = SdPlayer_GetCurrentTrack();
     if (current && strcmp(current, filepath) == 0) {
+        ESP_LOGI(TAG, "SD delete: stopping playback of current track");
         SdPlayer_Stop();
+        vTaskDelay(pdMS_TO_TICKS(100));  // Give time for file to close
     }
     
+    // Try to delete
     if (remove(filepath) == 0) {
         ESP_LOGI(TAG, "SD delete OK: %s", filepath);
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
     } else {
+        int err = errno;
+        ESP_LOGE(TAG, "SD delete failed: %s (errno=%d: %s)", filepath, err, strerror(err));
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"Delete failed\"}");
+        char err_buf[256];
+        snprintf(err_buf, sizeof(err_buf), "{\"status\":\"error\",\"error\":\"Delete failed\",\"detail\":\"%s\"}", strerror(err));
+        httpd_resp_sendstr(req, err_buf);
     }
     return ESP_OK;
 }
@@ -3080,7 +3137,7 @@ httpd_handle_t webserver_start(void) {
     config.lru_purge_enable = true;
     config.max_uri_handlers = 50;  // Increased for all endpoints + upload/delete
     config.max_resp_headers = 8;
-    config.recv_wait_timeout = 60;  // 60s timeout for large file uploads
+    config.recv_wait_timeout = 120;  // 120s timeout for large file uploads (slow connections)
     config.send_wait_timeout = 60;  // 60s send timeout for large responses
     config.stack_size = 16384;  // 16KB stack for upload handler with mkdir
     config.uri_match_fn = httpd_uri_match_wildcard;  // Support wildcards in URI
