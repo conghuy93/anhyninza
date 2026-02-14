@@ -15,6 +15,9 @@
 #include <cJSON.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include "stream_player_c.h"
 #include "mp3_player_c.h"
 
@@ -266,6 +269,7 @@ static const char html_content[] =
 "<button class=\"tab\" onclick=\"switchTab(3)\">🎵 Nhạc</button>"
 "<button class=\"tab\" onclick=\"switchTab(4)\">📂 SD Card</button>"
 "<button class=\"tab\" onclick=\"switchTab(5)\">💬 Chat AI</button>"
+"<button class=\"tab\" onclick=\"switchTab(6)\">⏰ Hẹn giờ</button>"
 "</div>"
 "<div id=\"tab1\" class=\"tab-content active\">"
 "<div style=\"background:#1a252f;padding:8px;border-radius:6px;margin:5px 0 10px 0;font-size:11px;line-height:1.5;\">"
@@ -573,6 +577,56 @@ static const char html_content[] =
 "<button class=\"btn\" style=\"background:#9b59b6;padding:10px 20px;font-size:0.9em\" onclick=\"sendChatMessage()\">📤 Gửi</button>"
 "</div>"
 "<div id=\"chatStatus\" style=\"color:#7f8c8d;font-size:0.75em;margin-top:6px;text-align:center\"></div>"
+"</div>"
+"</div>"
+"</div>"
+"<div id=\"tab6\" class=\"tab-content\">"
+"<div class=\"calibration\" style=\"max-width:600px;margin:8px auto;padding:0\">"
+"<h2 style=\"color:#e67e22;font-size:1em;padding:12px;margin:0;background:#1a252f;border-radius:8px 8px 0 0\">⏰ Báo thức & Hẹn giờ gửi tin</h2>"
+"<div style=\"padding:12px;background:#2c3e50;border-radius:0 0 8px 8px\">"
+"<div style=\"margin-bottom:16px\">"
+"<h3 style=\"color:#e67e22;font-size:0.9em;margin-bottom:8px\">🔔 Thêm Báo thức</h3>"
+"<div style=\"display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap\">"
+"<input type=\"time\" id=\"alarmTime\" style=\"padding:8px;border:2px solid #e67e22;border-radius:6px;background:#1a252f;color:#ecf0f1;font-size:0.9em\">"
+"<select id=\"alarmRepeat\" style=\"padding:8px;border:2px solid #e67e22;border-radius:6px;background:#1a252f;color:#ecf0f1;font-size:0.8em\">"
+"<option value=\"once\">Một lần</option>"
+"<option value=\"daily\">Hàng ngày</option>"
+"<option value=\"weekday\">Thứ 2-6</option>"
+"<option value=\"weekend\">T7-CN</option>"
+"</select>"
+"</div>"
+"<div style=\"margin-bottom:6px\">"
+"<label style=\"color:#7f8c8d;font-size:0.8em\">Nhạc báo thức (từ thẻ nhớ):</label>"
+"<select id=\"alarmMusic\" style=\"width:100%;padding:8px;border:2px solid #e67e22;border-radius:6px;background:#1a252f;color:#ecf0f1;font-size:0.8em;margin-top:4px\">"
+"<option value=\"\">⏳ Đang tải danh sách...</option>"
+"</select>"
+"</div>"
+"<button class=\"btn\" style=\"background:#e67e22;width:100%;padding:10px;font-size:0.85em\" onclick=\"addAlarm()\">➕ Thêm báo thức</button>"
+"</div>"
+"<hr style=\"border-color:#34495e;margin:12px 0\">"
+"<div style=\"margin-bottom:16px\">"
+"<h3 style=\"color:#3498db;font-size:0.9em;margin-bottom:8px\">📨 Thêm Hẹn giờ gửi tin</h3>"
+"<div style=\"display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap\">"
+"<input type=\"time\" id=\"schedTime\" style=\"padding:8px;border:2px solid #3498db;border-radius:6px;background:#1a252f;color:#ecf0f1;font-size:0.9em\">"
+"<select id=\"schedRepeat\" style=\"padding:8px;border:2px solid #3498db;border-radius:6px;background:#1a252f;color:#ecf0f1;font-size:0.8em\">"
+"<option value=\"once\">Một lần</option>"
+"<option value=\"daily\">Hàng ngày</option>"
+"<option value=\"weekday\">Thứ 2-6</option>"
+"<option value=\"weekend\">T7-CN</option>"
+"</select>"
+"</div>"
+"<div style=\"margin-bottom:6px\">"
+"<label style=\"color:#7f8c8d;font-size:0.8em\">Tin nhắn gửi cho AI:</label>"
+"<input type=\"text\" id=\"schedMessage\" placeholder=\"VD: Nhắc tôi uống thuốc...\" style=\"width:100%;padding:8px;border:2px solid #3498db;border-radius:6px;background:#1a252f;color:#ecf0f1;font-size:0.85em;margin-top:4px;box-sizing:border-box\">"
+"</div>"
+"<button class=\"btn\" style=\"background:#3498db;width:100%;padding:10px;font-size:0.85em\" onclick=\"addSchedule()\">➕ Thêm hẹn giờ gửi tin</button>"
+"</div>"
+"<hr style=\"border-color:#34495e;margin:12px 0\">"
+"<div>"
+"<h3 style=\"color:#2ecc71;font-size:0.9em;margin-bottom:8px\">📋 Danh sách hẹn giờ</h3>"
+"<div id=\"alarmList\" style=\"min-height:60px;color:#7f8c8d;font-size:0.85em\">Chưa có hẹn giờ nào</div>"
+"</div>"
+"<div id=\"alarmStatus\" style=\"color:#2ecc71;font-size:0.8em;margin-top:8px;text-align:center\"></div>"
 "</div>"
 "</div>"
 "</div>"
@@ -1039,7 +1093,7 @@ static const char html_content[] =
 "}).catch(()=>{});}"
 "/* Auto-load SD on tab switch */"
 "const origSwitch=switchTab;"
-"function switchTab(n){document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.getElementById('tab'+n).classList.add('active');document.querySelectorAll('.tab')[n-1].classList.add('active');if(n===3){fetch('/music_server').then(r=>r.json()).then(d=>{if(d.url){document.getElementById('musicServerUrl').value=d.url;}}).catch(()=>{});}if(n===4){sdLoadDir(sdCurrentPath);loadSdRepeatMode();startSdPoll();}else{stopSdPoll();}if(n===5){loadChatHistory();}}"
+"function switchTab(n){document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.getElementById('tab'+n).classList.add('active');document.querySelectorAll('.tab')[n-1].classList.add('active');if(n===3){fetch('/music_server').then(r=>r.json()).then(d=>{if(d.url){document.getElementById('musicServerUrl').value=d.url;}}).catch(()=>{});}if(n===4){sdLoadDir(sdCurrentPath);loadSdRepeatMode();startSdPoll();}else{stopSdPoll();}if(n===5){loadChatHistory();}if(n===6){loadAlarms();loadAlarmMusicList();}}"
 "/* SD Upload */"
 "let sdSelectedFile=null;"
 "let sdUploadQueue=[];"
@@ -1191,6 +1245,76 @@ static const char html_content[] =
 "}).catch(e=>{"
 "document.getElementById('chatStatus').textContent='Lỗi kết nối';"
 "setTimeout(()=>document.getElementById('chatStatus').textContent='',2000);});}"
+"/* === Alarm & Schedule === */"
+"function loadAlarmMusicList(){"
+"fetch('/sd_list?path='+encodeURIComponent('/sdcard')).then(r=>r.json()).then(d=>{"
+"const sel=document.getElementById('alarmMusic');"
+"sel.innerHTML='<option value=\"\">-- Chọn nhạc --</option>';"
+"if(d.mounted&&d.files){"
+"function addFiles(files){"
+"files.forEach(f=>{"
+"if(!f.dir&&(f.name.endsWith('.mp3')||f.name.endsWith('.wav')||f.name.endsWith('.ogg'))){"
+"const opt=document.createElement('option');opt.value=f.path;opt.textContent='♪ '+f.name;sel.appendChild(opt);"
+"}"
+"});"
+"}"
+"addFiles(d.files);"
+"}"
+"}).catch(()=>{});}"
+"function addAlarm(){"
+"const time=document.getElementById('alarmTime').value;"
+"if(!time){alert('Chọn giờ báo thức!');return;}"
+"const repeat=document.getElementById('alarmRepeat').value;"
+"const music=document.getElementById('alarmMusic').value;"
+"if(!music){alert('Chọn nhạc báo thức!');return;}"
+"const musicName=document.getElementById('alarmMusic').selectedOptions[0].textContent;"
+"const body=JSON.stringify({type:'alarm',time:time,repeat:repeat,music:music,music_name:musicName,enabled:true});"
+"fetch('/alarm_add',{method:'POST',headers:{'Content-Type':'application/json'},body:body}).then(r=>r.json()).then(d=>{"
+"if(d.ok){showAlarmStatus('✅ Đã thêm báo thức '+time);loadAlarms();}else{showAlarmStatus('❌ '+d.error);}"
+"}).catch(()=>showAlarmStatus('❌ Lỗi kết nối'));}"
+"function addSchedule(){"
+"const time=document.getElementById('schedTime').value;"
+"if(!time){alert('Chọn giờ hẹn!');return;}"
+"const repeat=document.getElementById('schedRepeat').value;"
+"const msg=document.getElementById('schedMessage').value.trim();"
+"if(!msg){alert('Nhập tin nhắn!');return;}"
+"const body=JSON.stringify({type:'schedule',time:time,repeat:repeat,message:msg,enabled:true});"
+"fetch('/alarm_add',{method:'POST',headers:{'Content-Type':'application/json'},body:body}).then(r=>r.json()).then(d=>{"
+"if(d.ok){showAlarmStatus('✅ Đã thêm hẹn giờ '+time);loadAlarms();document.getElementById('schedMessage').value='';}else{showAlarmStatus('❌ '+d.error);}"
+"}).catch(()=>showAlarmStatus('❌ Lỗi kết nối'));}"
+"function loadAlarms(){"
+"fetch('/alarm_list').then(r=>r.json()).then(d=>{"
+"const list=document.getElementById('alarmList');"
+"if(!d.alarms||!d.alarms.length){list.innerHTML='<div style=\"color:#7f8c8d;text-align:center;padding:12px\">Chưa có hẹn giờ nào</div>';return;}"
+"let h='';"
+"d.alarms.forEach((a,i)=>{"
+"const isAlarm=a.type==='alarm';"
+"const color=isAlarm?'#e67e22':'#3498db';"
+"const icon=isAlarm?'🔔':'📨';"
+"const repeatText={'once':'Một lần','daily':'Hàng ngày','weekday':'T2-T6','weekend':'T7-CN'};"
+"h+='<div style=\"display:flex;align-items:center;padding:8px;margin-bottom:6px;background:#1a252f;border-radius:6px;border-left:3px solid '+color+'\">';"
+"h+='<div style=\"flex:1\">';"
+"h+='<div style=\"font-size:1.2em;font-weight:bold;color:'+color+'\">'+icon+' '+a.time+'</div>';"
+"h+='<div style=\"font-size:0.75em;color:#7f8c8d;margin-top:2px\">'+(repeatText[a.repeat]||a.repeat);"
+"if(isAlarm){h+=' | '+((a.music_name||'').replace('♪ ',''));}"
+"else{h+=' | \\\"'+a.message+'\\\"';}"
+"h+='</div></div>';"
+"h+='<label style=\"margin:0 8px;cursor:pointer\"><input type=\"checkbox\" '+(a.enabled?'checked':'')+' onchange=\"toggleAlarm('+i+',this.checked)\" style=\"width:18px;height:18px\"></label>';"
+"h+='<span onclick=\"deleteAlarm('+i+')\" style=\"color:#e74c3c;cursor:pointer;font-size:1.2em;padding:4px\" title=\"Xóa\">🗑</span>';"
+"h+='</div>';"
+"});"
+"list.innerHTML=h;"
+"}).catch(()=>{});}"
+"function toggleAlarm(idx,en){"
+"fetch('/alarm_toggle?idx='+idx+'&enabled='+(en?1:0)).then(r=>r.json()).then(d=>{"
+"if(d.ok){showAlarmStatus(en?'✅ Đã bật':'⏸ Đã tắt');}loadAlarms();"
+"}).catch(()=>showAlarmStatus('❌ Lỗi'));}"
+"function deleteAlarm(idx){"
+"if(!confirm('Xóa hẹn giờ này?'))return;"
+"fetch('/alarm_delete?idx='+idx).then(r=>r.json()).then(d=>{"
+"if(d.ok){showAlarmStatus('🗑 Đã xóa');loadAlarms();}else{showAlarmStatus('❌ '+d.error);}"
+"}).catch(()=>showAlarmStatus('❌ Lỗi'));}"
+"function showAlarmStatus(msg){const s=document.getElementById('alarmStatus');s.textContent=msg;setTimeout(()=>s.textContent='',3000);}"
 "</script>"
 "</body></html>";
 
@@ -2751,6 +2875,365 @@ static esp_err_t chat_send_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// ==================== ALARM & SCHEDULE SYSTEM ====================
+
+#define MAX_ALARMS 10
+
+typedef struct {
+    bool used;
+    bool enabled;
+    char type[12];      // "alarm" or "schedule"
+    int hour;
+    int minute;
+    char repeat[12];    // "once", "daily", "weekday", "weekend"
+    char music[256];    // SD card path for alarm
+    char music_name[64];
+    char message[256];  // Message for schedule
+    bool fired_today;   // Prevent re-firing within same minute
+} alarm_entry_t;
+
+static alarm_entry_t alarms[MAX_ALARMS];
+static SemaphoreHandle_t alarm_mutex = NULL;
+static TaskHandle_t alarm_task_handle = NULL;
+
+static void alarm_init(void) {
+    if (!alarm_mutex) {
+        alarm_mutex = xSemaphoreCreateMutex();
+    }
+    memset(alarms, 0, sizeof(alarms));
+    // Load from NVS
+    nvs_handle_t handle;
+    if (nvs_open("alarms", NVS_READONLY, &handle) == ESP_OK) {
+        for (int i = 0; i < MAX_ALARMS; i++) {
+            char key[16];
+            size_t len = sizeof(alarm_entry_t);
+            snprintf(key, sizeof(key), "alarm_%d", i);
+            if (nvs_get_blob(handle, key, &alarms[i], &len) == ESP_OK) {
+                ESP_LOGI(TAG, "Loaded alarm %d: %s %02d:%02d %s", i, alarms[i].type, alarms[i].hour, alarms[i].minute, alarms[i].repeat);
+            }
+        }
+        nvs_close(handle);
+    }
+}
+
+static void alarm_save(void) {
+    nvs_handle_t handle;
+    if (nvs_open("alarms", NVS_READWRITE, &handle) == ESP_OK) {
+        for (int i = 0; i < MAX_ALARMS; i++) {
+            char key[16];
+            snprintf(key, sizeof(key), "alarm_%d", i);
+            if (alarms[i].used) {
+                nvs_set_blob(handle, key, &alarms[i], sizeof(alarm_entry_t));
+            } else {
+                nvs_erase_key(handle, key);
+            }
+        }
+        nvs_commit(handle);
+        nvs_close(handle);
+    }
+}
+
+static void alarm_check_task(void *pvParameter) {
+    ESP_LOGI(TAG, "Alarm check task started");
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(1000));  // Check every second
+        
+        time_t now;
+        struct tm timeinfo;
+        time(&now);
+        localtime_r(&now, &timeinfo);
+        
+        int cur_hour = timeinfo.tm_hour;
+        int cur_min = timeinfo.tm_min;
+        int cur_sec = timeinfo.tm_sec;
+        int cur_wday = timeinfo.tm_wday;  // 0=Sunday, 1=Monday, ..., 6=Saturday
+        
+        if (xSemaphoreTake(alarm_mutex, pdMS_TO_TICKS(100)) != pdTRUE) continue;
+        
+        for (int i = 0; i < MAX_ALARMS; i++) {
+            if (!alarms[i].used || !alarms[i].enabled) continue;
+            
+            // Check if time matches
+            if (alarms[i].hour != cur_hour || alarms[i].minute != cur_min) {
+                // Reset fired_today flag when minute changes
+                if (alarms[i].fired_today && alarms[i].minute != cur_min) {
+                    alarms[i].fired_today = false;
+                }
+                continue;
+            }
+            
+            // Only trigger at second 0, and only once per minute
+            if (cur_sec != 0 || alarms[i].fired_today) continue;
+            
+            // Check repeat/day matching
+            bool should_fire = false;
+            if (strcmp(alarms[i].repeat, "once") == 0) {
+                should_fire = true;
+            } else if (strcmp(alarms[i].repeat, "daily") == 0) {
+                should_fire = true;
+            } else if (strcmp(alarms[i].repeat, "weekday") == 0) {
+                should_fire = (cur_wday >= 1 && cur_wday <= 5);
+            } else if (strcmp(alarms[i].repeat, "weekend") == 0) {
+                should_fire = (cur_wday == 0 || cur_wday == 6);
+            }
+            
+            if (!should_fire) continue;
+            
+            alarms[i].fired_today = true;
+            
+            ESP_LOGI(TAG, "🔔 ALARM TRIGGERED: [%d] %s at %02d:%02d", i, alarms[i].type, cur_hour, cur_min);
+            
+            if (strcmp(alarms[i].type, "alarm") == 0) {
+                // ALARM: Play music from SD card
+                ESP_LOGI(TAG, "Playing alarm music: %s", alarms[i].music);
+                SdPlayer_Play(alarms[i].music);
+            } else if (strcmp(alarms[i].type, "schedule") == 0) {
+                // SCHEDULE: Step 1 - Wake robot, Step 2 - Send message
+                ESP_LOGI(TAG, "Sending scheduled message: %s", alarms[i].message);
+                // send_text_to_ai internally wakes the robot via wake word trick
+                send_text_to_ai(alarms[i].message);
+            }
+            
+            // Disable one-time alarms after firing
+            if (strcmp(alarms[i].repeat, "once") == 0) {
+                alarms[i].enabled = false;
+                ESP_LOGI(TAG, "One-time alarm [%d] disabled after firing", i);
+            }
+        }
+        
+        xSemaphoreGive(alarm_mutex);
+        
+        // Save periodically (every 60 seconds) to persist fired_today/enabled changes
+        if (cur_sec == 30) {
+            if (xSemaphoreTake(alarm_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                alarm_save();
+                xSemaphoreGive(alarm_mutex);
+            }
+        }
+    }
+}
+
+static void alarm_start_task(void) {
+    if (alarm_task_handle == NULL) {
+        alarm_init();
+        xTaskCreatePinnedToCore(alarm_check_task, "alarm_task", 4096, NULL, 3, &alarm_task_handle, 0);
+    }
+}
+
+// Handler: POST /alarm_add
+static esp_err_t alarm_add_handler(httpd_req_t *req) {
+    int total_len = req->content_len;
+    if (total_len <= 0 || total_len > 1024) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Invalid request\"}");
+        return ESP_OK;
+    }
+    
+    char* buf = (char*)malloc(total_len + 1);
+    if (!buf) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Out of memory\"}");
+        return ESP_OK;
+    }
+    
+    int ret = httpd_req_recv(req, buf, total_len);
+    if (ret <= 0) {
+        free(buf);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Receive failed\"}");
+        return ESP_OK;
+    }
+    buf[ret] = '\0';
+    
+    cJSON* root = cJSON_Parse(buf);
+    free(buf);
+    
+    if (!root) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Invalid JSON\"}");
+        return ESP_OK;
+    }
+    
+    cJSON* type_j = cJSON_GetObjectItem(root, "type");
+    cJSON* time_j = cJSON_GetObjectItem(root, "time");
+    cJSON* repeat_j = cJSON_GetObjectItem(root, "repeat");
+    
+    if (!cJSON_IsString(type_j) || !cJSON_IsString(time_j) || !cJSON_IsString(repeat_j)) {
+        cJSON_Delete(root);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Missing fields\"}");
+        return ESP_OK;
+    }
+    
+    // Parse time "HH:MM"
+    int hour = 0, minute = 0;
+    if (sscanf(time_j->valuestring, "%d:%d", &hour, &minute) != 2) {
+        cJSON_Delete(root);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Invalid time format\"}");
+        return ESP_OK;
+    }
+    
+    if (xSemaphoreTake(alarm_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        cJSON_Delete(root);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Busy\"}");
+        return ESP_OK;
+    }
+    
+    // Find free slot
+    int slot = -1;
+    for (int i = 0; i < MAX_ALARMS; i++) {
+        if (!alarms[i].used) { slot = i; break; }
+    }
+    
+    if (slot < 0) {
+        xSemaphoreGive(alarm_mutex);
+        cJSON_Delete(root);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Đã đầy (tối đa 10)\"}");
+        return ESP_OK;
+    }
+    
+    memset(&alarms[slot], 0, sizeof(alarm_entry_t));
+    alarms[slot].used = true;
+    alarms[slot].enabled = true;
+    alarms[slot].hour = hour;
+    alarms[slot].minute = minute;
+    strncpy(alarms[slot].type, type_j->valuestring, sizeof(alarms[slot].type) - 1);
+    strncpy(alarms[slot].repeat, repeat_j->valuestring, sizeof(alarms[slot].repeat) - 1);
+    
+    if (strcmp(type_j->valuestring, "alarm") == 0) {
+        cJSON* music_j = cJSON_GetObjectItem(root, "music");
+        cJSON* music_name_j = cJSON_GetObjectItem(root, "music_name");
+        if (cJSON_IsString(music_j)) strncpy(alarms[slot].music, music_j->valuestring, sizeof(alarms[slot].music) - 1);
+        if (cJSON_IsString(music_name_j)) strncpy(alarms[slot].music_name, music_name_j->valuestring, sizeof(alarms[slot].music_name) - 1);
+    } else if (strcmp(type_j->valuestring, "schedule") == 0) {
+        cJSON* msg_j = cJSON_GetObjectItem(root, "message");
+        if (cJSON_IsString(msg_j)) strncpy(alarms[slot].message, msg_j->valuestring, sizeof(alarms[slot].message) - 1);
+    }
+    
+    alarm_save();
+    xSemaphoreGive(alarm_mutex);
+    cJSON_Delete(root);
+    
+    ESP_LOGI(TAG, "Alarm added [%d]: %s %02d:%02d %s", slot, type_j->valuestring, hour, minute, repeat_j->valuestring);
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+// Handler: GET /alarm_list
+static esp_err_t alarm_list_handler(httpd_req_t *req) {
+    if (xSemaphoreTake(alarm_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"alarms\":[]}");
+        return ESP_OK;
+    }
+    
+    cJSON* root = cJSON_CreateObject();
+    cJSON* arr = cJSON_AddArrayToObject(root, "alarms");
+    
+    for (int i = 0; i < MAX_ALARMS; i++) {
+        if (!alarms[i].used) continue;
+        cJSON* item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "type", alarms[i].type);
+        char time_str[8];
+        snprintf(time_str, sizeof(time_str), "%02d:%02d", alarms[i].hour, alarms[i].minute);
+        cJSON_AddStringToObject(item, "time", time_str);
+        cJSON_AddStringToObject(item, "repeat", alarms[i].repeat);
+        cJSON_AddBoolToObject(item, "enabled", alarms[i].enabled);
+        if (strcmp(alarms[i].type, "alarm") == 0) {
+            cJSON_AddStringToObject(item, "music", alarms[i].music);
+            cJSON_AddStringToObject(item, "music_name", alarms[i].music_name);
+        } else {
+            cJSON_AddStringToObject(item, "message", alarms[i].message);
+        }
+        cJSON_AddItemToArray(arr, item);
+    }
+    
+    xSemaphoreGive(alarm_mutex);
+    
+    char* json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json ? json : "{\"alarms\":[]}");
+    if (json) free(json);
+    return ESP_OK;
+}
+
+// Handler: GET /alarm_toggle?idx=N&enabled=0|1
+static esp_err_t alarm_toggle_handler(httpd_req_t *req) {
+    char val[8] = {0};
+    int idx = -1;
+    int en = -1;
+    
+    if (get_query_param(req, "idx", val, sizeof(val)) == ESP_OK) idx = atoi(val);
+    if (get_query_param(req, "enabled", val, sizeof(val)) == ESP_OK) en = atoi(val);
+    
+    if (idx < 0 || idx >= MAX_ALARMS) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Invalid index\"}");
+        return ESP_OK;
+    }
+    
+    if (xSemaphoreTake(alarm_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        // Find the idx-th used alarm
+        int count = 0;
+        for (int i = 0; i < MAX_ALARMS; i++) {
+            if (!alarms[i].used) continue;
+            if (count == idx) {
+                alarms[i].enabled = (en == 1);
+                alarms[i].fired_today = false;
+                ESP_LOGI(TAG, "Alarm [%d] %s", i, en ? "enabled" : "disabled");
+                break;
+            }
+            count++;
+        }
+        alarm_save();
+        xSemaphoreGive(alarm_mutex);
+    }
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+// Handler: GET /alarm_delete?idx=N
+static esp_err_t alarm_delete_handler(httpd_req_t *req) {
+    char val[8] = {0};
+    int idx = -1;
+    
+    if (get_query_param(req, "idx", val, sizeof(val)) == ESP_OK) idx = atoi(val);
+    
+    if (idx < 0 || idx >= MAX_ALARMS) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Invalid index\"}");
+        return ESP_OK;
+    }
+    
+    if (xSemaphoreTake(alarm_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        int count = 0;
+        for (int i = 0; i < MAX_ALARMS; i++) {
+            if (!alarms[i].used) continue;
+            if (count == idx) {
+                memset(&alarms[i], 0, sizeof(alarm_entry_t));
+                ESP_LOGI(TAG, "Alarm [%d] deleted", i);
+                break;
+            }
+            count++;
+        }
+        alarm_save();
+        xSemaphoreGive(alarm_mutex);
+    }
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 // Handler for mode switch (walk/roll) - non-blocking with background task
 static esp_err_t mode_handler(httpd_req_t *req) {
     char mode_str[8];
@@ -3131,6 +3614,34 @@ static const httpd_uri_t uri_chat_history = {
     .user_ctx = NULL
 };
 
+static const httpd_uri_t uri_alarm_add = {
+    .uri = "/alarm_add",
+    .method = HTTP_POST,
+    .handler = alarm_add_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_alarm_list = {
+    .uri = "/alarm_list",
+    .method = HTTP_GET,
+    .handler = alarm_list_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_alarm_toggle = {
+    .uri = "/alarm_toggle",
+    .method = HTTP_GET,
+    .handler = alarm_toggle_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_alarm_delete = {
+    .uri = "/alarm_delete",
+    .method = HTTP_GET,
+    .handler = alarm_delete_handler,
+    .user_ctx = NULL
+};
+
 httpd_handle_t webserver_start(void) {
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -3197,6 +3708,14 @@ httpd_handle_t webserver_start(void) {
         // Chat AI handlers
         httpd_register_uri_handler(server, &uri_chat_send);
         httpd_register_uri_handler(server, &uri_chat_history);
+        // Alarm & Schedule handlers
+        httpd_register_uri_handler(server, &uri_alarm_add);
+        httpd_register_uri_handler(server, &uri_alarm_list);
+        httpd_register_uri_handler(server, &uri_alarm_toggle);
+        httpd_register_uri_handler(server, &uri_alarm_delete);
+        
+        // Start alarm check task
+        alarm_start_task();
         
         ESP_LOGI(TAG, "Web server started!");
         return server;
