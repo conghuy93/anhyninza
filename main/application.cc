@@ -262,6 +262,17 @@ void Application::Run() {
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
             }
+
+            // Speaking timeout safety - if stuck in Speaking for >60s, force recovery
+            // This handles cases where server doesn't send tts/stop (network issue, server bug)
+            if (GetDeviceState() == kDeviceStateSpeaking && clock_ticks_ > 60) {
+                ESP_LOGW(TAG, "⚠️ Speaking timeout (%d seconds), forcing channel close", clock_ticks_);
+                if (protocol_ && protocol_->IsAudioChannelOpened()) {
+                    protocol_->CloseAudioChannel();  // Triggers OnAudioChannelClosed → Idle
+                } else {
+                    SetDeviceState(kDeviceStateIdle);
+                }
+            }
         }
     }
 }
@@ -725,7 +736,19 @@ void Application::HandleToggleChatEvent() {
         }
         SetListeningMode(mode);
     } else if (state == kDeviceStateSpeaking) {
-        AbortSpeaking(kAbortReasonNone);
+        abort_count_++;
+        if (abort_count_ >= 2) {
+            // Force close channel after 2 abort attempts (server not responding)
+            ESP_LOGW(TAG, "Force closing channel after %d abort attempts", abort_count_);
+            abort_count_ = 0;
+            if (protocol_->IsAudioChannelOpened()) {
+                protocol_->CloseAudioChannel();  // Triggers OnAudioChannelClosed → Idle
+            } else {
+                SetDeviceState(kDeviceStateIdle);
+            }
+        } else {
+            AbortSpeaking(kAbortReasonNone);
+        }
     } else if (state == kDeviceStateListening) {
         protocol_->CloseAudioChannel();
     }
@@ -857,6 +880,7 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
 void Application::HandleStateChangedEvent() {
     DeviceState new_state = state_machine_.GetState();
     clock_ticks_ = 0;
+    abort_count_ = 0;  // Reset abort counter on any state change
 
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
@@ -1126,28 +1150,65 @@ bool Application::SendChatText(const std::string& text) {
         ESP_LOGW(TAG, "Text truncated from %d to %d chars", (int)text.length(), MAX_TEXT_LENGTH);
     }
     
-    // If audio channel is not opened, try to open it
-    if (!protocol_->IsAudioChannelOpened()) {
-        ESP_LOGI(TAG, "Opening audio channel for text chat...");
-        if (!protocol_->OpenAudioChannel()) {
-            ESP_LOGE(TAG, "Failed to open audio channel for text chat");
+    ESP_LOGI(TAG, "📨 SendChatText: \"%s\"", text_to_send.c_str());
+    
+    // ===== Kiki pattern: Wake robot first, then send message =====
+    // Like a real person: wake up → robot starts listening → speak → robot processes
+    //
+    // Step 1: Wake up robot (Idle → Connecting → Listening)
+    //         ToggleChatState() opens audio channel and enters Listening state
+    // Step 2: Wait for connection to establish (2 seconds)
+    // Step 3: Send text as STT message → Server AI → LLM → TTS → Speaker
+    
+    // Step 1: If robot is Idle, wake it up via ToggleChatState
+    auto state = GetDeviceState();
+    if (state == kDeviceStateIdle) {
+        ESP_LOGI(TAG, "📨 Step 1: Waking up robot (Idle → Connecting → Listening)...");
+        
+        // Schedule ToggleChatState on main thread (sets state properly)
+        Schedule([this]() {
+            auto& app = Application::GetInstance();
+            if (app.GetDeviceState() == kDeviceStateIdle) {
+                app.ToggleChatState();
+            }
+        });
+        
+        // Step 2: Wait for channel to open and state transitions to complete
+        // ToggleChatState: Idle → Connecting → OpenAudioChannel → Listening
+        // This takes ~1-2 seconds depending on network
+        ESP_LOGI(TAG, "📨 Step 2: Waiting 2s for connection...");
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        
+        // Verify state after wake-up
+        state = GetDeviceState();
+        ESP_LOGI(TAG, "📨 After wake-up, state: %d", (int)state);
+        
+        if (state != kDeviceStateListening && state != kDeviceStateSpeaking && 
+            state != kDeviceStateConnecting) {
+            ESP_LOGE(TAG, "📨 Wake-up failed, state=%d, aborting", (int)state);
             return false;
         }
+    } else {
+        ESP_LOGI(TAG, "📨 Robot already active (state=%d), sending directly", (int)state);
     }
     
-    // Disable voice processing - we're sending text, not audio
-    audio_service_.EnableVoiceProcessing(false);
-    audio_service_.EnableWakeWordDetection(false);
-    
-    // TRICK: Send text as "wake word detected" message
-    // Server will treat this as STT result and process with LLM
-    // This is how kiki board does it - see otto_webserver.cc
-    ESP_LOGI(TAG, "Sending text as wake word: %s", text_to_send.c_str());
-    protocol_->SendWakeWordDetected(text_to_send);
-    
-    // Tell server we stopped listening (text input complete)
-    protocol_->SendStopListening();
-    ESP_LOGI(TAG, "Text sent to server, waiting for AI response");
+    // Step 3: Send text message on main thread
+    // Schedule ensures audio_service_ calls happen on main thread (no AFE race condition)
+    Schedule([this, text_to_send]() {
+        ESP_LOGI(TAG, "📨 Step 3: [MainThread] Sending: \"%s\"", text_to_send.c_str());
+        
+        // Disable voice processing - we're sending text, not mic audio
+        audio_service_.EnableVoiceProcessing(false);
+        audio_service_.EnableWakeWordDetection(false);
+        
+        // Send text as "wake word detected" → server treats as STT → LLM → TTS → Speaker
+        protocol_->SendWakeWordDetected(text_to_send);
+        
+        // Tell server we stopped listening (text input complete, process now)
+        protocol_->SendStopListening();
+        
+        ESP_LOGI(TAG, "📨 [MainThread] Text sent to server, waiting for AI response via TTS");
+    });
     
     return true;
 }

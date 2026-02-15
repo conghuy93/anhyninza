@@ -1,5 +1,6 @@
 #include "audio_service.h"
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <cstring>
 
 #define RATE_CVT_CFG(_src_rate, _dest_rate, _channel)        \
@@ -158,12 +159,28 @@ void AudioService::Start() {
     }, "audio_output", 2048, this, 4, &audio_output_task_handle_);
 #endif
 
-    /* Start the opus codec task */
-    xTaskCreate([](void* arg) {
-        AudioService* audio_service = (AudioService*)arg;
-        audio_service->OpusCodecTask();
-        vTaskDelete(NULL);
-    }, "opus_codec", 2048 * 12, this, 2, &opus_codec_task_handle_);
+    /* Start the opus codec task (stack in PSRAM to save ~24KB SRAM) */
+    {
+        const size_t opus_stack_size = 2048 * 12;
+        StackType_t* opus_stack = (StackType_t*)heap_caps_malloc(opus_stack_size, MALLOC_CAP_SPIRAM);
+        StaticTask_t* opus_task_buf = (StaticTask_t*)heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (opus_stack && opus_task_buf) {
+            opus_codec_task_handle_ = xTaskCreateStaticPinnedToCore([](void* arg) {
+                AudioService* audio_service = (AudioService*)arg;
+                audio_service->OpusCodecTask();
+                vTaskDelete(NULL);
+            }, "opus_codec", opus_stack_size, this, 2, opus_stack, opus_task_buf, tskNO_AFFINITY);
+        } else {
+            ESP_LOGW(TAG, "Failed to alloc PSRAM for opus_codec, falling back to SRAM");
+            if (opus_stack) heap_caps_free(opus_stack);
+            if (opus_task_buf) heap_caps_free(opus_task_buf);
+            xTaskCreate([](void* arg) {
+                AudioService* audio_service = (AudioService*)arg;
+                audio_service->OpusCodecTask();
+                vTaskDelete(NULL);
+            }, "opus_codec", opus_stack_size, this, 2, &opus_codec_task_handle_);
+        }
+    }
 }
 
 void AudioService::Stop() {

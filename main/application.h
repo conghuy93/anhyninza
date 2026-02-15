@@ -153,6 +153,7 @@ private:
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     int clock_ticks_ = 0;
+    int abort_count_ = 0;  // Count consecutive abort attempts in Speaking state
     TaskHandle_t activation_task_handle_ = nullptr;
 
 

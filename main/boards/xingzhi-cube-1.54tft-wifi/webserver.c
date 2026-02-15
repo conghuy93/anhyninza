@@ -2933,8 +2933,24 @@ static void alarm_save(void) {
     }
 }
 
+// Struct to hold pending alarm actions (collected while holding mutex, executed after release)
+typedef struct {
+    int index;
+    char type[16];       // "alarm" or "schedule"
+    char music[128];     // SD card path for alarm music (reduced from 256)
+    char message[128];   // Message text for schedule (reduced from 256)
+} alarm_fire_t;
+
+// Static pending array - avoids putting ~5KB on alarm task stack (saves internal SRAM)
+#define MAX_PENDING_ALARMS 3  // Max alarms that can fire at the same minute
+static alarm_fire_t s_pending[MAX_PENDING_ALARMS];
+static int s_pending_count = 0;
+
 static void alarm_check_task(void *pvParameter) {
-    ESP_LOGI(TAG, "Alarm check task started");
+    ESP_LOGI(TAG, "⏰ Alarm check task started (stack: 4096 bytes, pending: static)");
+    
+    // Pending fires - use static array (not on stack) to save internal SRAM
+    
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));  // Check every second
         
@@ -2948,6 +2964,9 @@ static void alarm_check_task(void *pvParameter) {
         int cur_sec = timeinfo.tm_sec;
         int cur_wday = timeinfo.tm_wday;  // 0=Sunday, 1=Monday, ..., 6=Saturday
         
+        s_pending_count = 0;
+        
+        // === PHASE 1: Collect alarms to fire (mutex held, fast) ===
         if (xSemaphoreTake(alarm_mutex, pdMS_TO_TICKS(100)) != pdTRUE) continue;
         
         for (int i = 0; i < MAX_ALARMS; i++) {
@@ -2978,32 +2997,54 @@ static void alarm_check_task(void *pvParameter) {
             }
             
             if (!should_fire) continue;
+            if (s_pending_count >= MAX_PENDING_ALARMS) {
+                ESP_LOGW(TAG, "⚠️ Too many alarms at same time, skipping [%d]", i);
+                continue;
+            }
             
+            // Mark as fired and collect for execution outside mutex
             alarms[i].fired_today = true;
             
-            ESP_LOGI(TAG, "🔔 ALARM TRIGGERED: [%d] %s at %02d:%02d", i, alarms[i].type, cur_hour, cur_min);
+            s_pending[s_pending_count].index = i;
+            strncpy(s_pending[s_pending_count].type, alarms[i].type, sizeof(s_pending[s_pending_count].type) - 1);
+            strncpy(s_pending[s_pending_count].music, alarms[i].music, sizeof(s_pending[s_pending_count].music) - 1);
+            strncpy(s_pending[s_pending_count].message, alarms[i].message, sizeof(s_pending[s_pending_count].message) - 1);
+            s_pending_count++;
             
-            if (strcmp(alarms[i].type, "alarm") == 0) {
-                // ALARM: Play music from SD card
-                ESP_LOGI(TAG, "Playing alarm music: %s", alarms[i].music);
-                SdPlayer_Play(alarms[i].music);
-            } else if (strcmp(alarms[i].type, "schedule") == 0) {
-                // SCHEDULE: Step 1 - Wake robot, Step 2 - Send message
-                ESP_LOGI(TAG, "Sending scheduled message: %s", alarms[i].message);
-                // send_text_to_ai internally wakes the robot via wake word trick
-                send_text_to_ai(alarms[i].message);
-            }
-            
-            // Disable one-time alarms after firing
+            // Disable one-time alarms
             if (strcmp(alarms[i].repeat, "once") == 0) {
                 alarms[i].enabled = false;
-                ESP_LOGI(TAG, "One-time alarm [%d] disabled after firing", i);
+                ESP_LOGI(TAG, "📋 One-time alarm [%d] will be disabled after firing", i);
             }
+        }
+        
+        // Save changes if any alarms fired (fired_today, enabled flags changed)
+        if (s_pending_count > 0) {
+            alarm_save();
         }
         
         xSemaphoreGive(alarm_mutex);
         
-        // Save periodically (every 60 seconds) to persist fired_today/enabled changes
+        // === PHASE 2: Execute alarm actions (mutex released, safe for long ops) ===
+        for (int p = 0; p < s_pending_count; p++) {
+            int idx = s_pending[p].index;
+            
+            if (strcmp(s_pending[p].type, "alarm") == 0) {
+                // 🔔 ALARM MODE: Play music from SD card
+                ESP_LOGI(TAG, "🔔 ALARM FIRED [%d] at %02d:%02d → Playing: %s",
+                         idx, cur_hour, cur_min, s_pending[p].music);
+                SdPlayer_Play(s_pending[p].music);
+                
+            } else if (strcmp(s_pending[p].type, "schedule") == 0) {
+                // 📨 SCHEDULE MODE: Send message to AI server
+                ESP_LOGI(TAG, "📨 SCHEDULE FIRED [%d] at %02d:%02d → Message: \"%s\"",
+                         idx, cur_hour, cur_min, s_pending[p].message);
+                send_text_to_ai(s_pending[p].message);
+                ESP_LOGI(TAG, "📨 Message [%d] sent, server will respond via TTS", idx);
+            }
+        }
+        
+        // Save periodically (every 60 seconds) to persist fired_today changes
         if (cur_sec == 30) {
             if (xSemaphoreTake(alarm_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 alarm_save();
@@ -3115,9 +3156,10 @@ static esp_err_t alarm_add_handler(httpd_req_t *req) {
     
     alarm_save();
     xSemaphoreGive(alarm_mutex);
-    cJSON_Delete(root);
     
-    ESP_LOGI(TAG, "Alarm added [%d]: %s %02d:%02d %s", slot, type_j->valuestring, hour, minute, repeat_j->valuestring);
+    ESP_LOGI(TAG, "Alarm added [%d]: %s %02d:%02d %s", slot, alarms[slot].type, hour, minute, alarms[slot].repeat);
+    
+    cJSON_Delete(root);
     
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
