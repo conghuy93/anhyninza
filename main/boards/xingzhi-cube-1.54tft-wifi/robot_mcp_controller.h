@@ -8,8 +8,10 @@
 
 #include "robot_control.h"
 #include "mcp_server.h"
+#include "webserver.h"
 #include <esp_log.h>
 #include <string>
+#include <cmath>
 
 #define TAG_MCP "robot_mcp"
 
@@ -440,7 +442,289 @@ static void register_robot_mcp_tools() {
         }
     );
     
-    ESP_LOGI(TAG_MCP, "Robot MCP tools registered (12 tools)");
+    // ==================== ALARM SCHEDULING ====================
+    
+    // Set alarm or schedule
+    mcp_server.AddTool(
+        "self.alarm.set",
+        "Đặt báo thức hoặc lịch nhắc nhở.\n"
+        "Args:\n"
+        "  type: 'alarm' (phát nhạc) hoặc 'schedule' (gửi tin nhắn AI)\n"
+        "  hour: 0-23\n"
+        "  minute: 0-59\n"
+        "  repeat: 'once' (1 lần), 'daily' (hàng ngày), 'weekday' (thứ 2-6), 'weekend' (thứ 7, CN)\n"
+        "  message: nội dung nhắc nhở (cho schedule)\n"
+        "  music: đường dẫn nhạc SD (cho alarm, vd: /sdcard/music/song.mp3)\n"
+        "  music_name: tên bài hát (cho alarm)\n"
+        "Return: Thông báo kết quả",
+        PropertyList({
+            Property("type", kPropertyTypeString),
+            Property("hour", kPropertyTypeInteger),
+            Property("minute", kPropertyTypeInteger),
+            Property("repeat", kPropertyTypeString, std::string("once")),
+            Property("message", kPropertyTypeString, std::string("")),
+            Property("music", kPropertyTypeString, std::string("")),
+            Property("music_name", kPropertyTypeString, std::string(""))
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            std::string type = "schedule";
+            int hour = 0;
+            int minute = 0;
+            std::string repeat = "once";
+            std::string message = "";
+            std::string music = "";
+            std::string music_name = "";
+            
+            try { type = properties["type"].value<std::string>(); } catch(...) {}
+            try { hour = properties["hour"].value<int>(); } catch(...) {}
+            try { minute = properties["minute"].value<int>(); } catch(...) {}
+            try { repeat = properties["repeat"].value<std::string>(); } catch(...) {}
+            try { message = properties["message"].value<std::string>(); } catch(...) {}
+            try { music = properties["music"].value<std::string>(); } catch(...) {}
+            try { music_name = properties["music_name"].value<std::string>(); } catch(...) {}
+            
+            if (type != "alarm" && type != "schedule") {
+                return std::string("Lỗi: type phải là 'alarm' hoặc 'schedule'");
+            }
+            
+            int result = alarm_add_from_mcp(
+                type.c_str(),
+                hour,
+                minute,
+                repeat.c_str(),
+                message.empty() ? nullptr : message.c_str(),
+                music.empty() ? nullptr : music.c_str(),
+                music_name.empty() ? nullptr : music_name.c_str()
+            );
+            
+            if (result >= 0) {
+                ESP_LOGI(TAG_MCP, "Alarm set: %s %02d:%02d %s", type.c_str(), hour, minute, repeat.c_str());
+                char buf[128];
+                snprintf(buf, sizeof(buf), "Đã đặt %s lúc %02d:%02d (%s)",
+                         type == "alarm" ? "báo thức" : "lịch nhắc",
+                         hour, minute, repeat.c_str());
+                return std::string(buf);
+            } else if (result == -2) {
+                return std::string("Lỗi: giờ/phút không hợp lệ (0-23, 0-59)");
+            } else if (result == -3) {
+                return std::string("Lỗi: hệ thống bận");
+            } else if (result == -4) {
+                return std::string("Lỗi: đã đầy (tối đa 10 báo thức)");
+            } else {
+                return std::string("Lỗi: không thể đặt báo thức");
+            }
+        }
+    );
+    
+    // Play saved action (already exists, but add alias for "dance from slot")
+    mcp_server.AddTool(
+        "self.robot.play_saved",
+        "Nhảy động tác đã lưu trong slot. Đây là alias của self.robot.play.\n"
+        "slot: 0, 1 hoặc 2 (tương ứng slot 1, 2, 3)",
+        PropertyList({
+            Property("slot", kPropertyTypeInteger)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            int slot = 0;
+            try { slot = properties["slot"].value<int>(); } catch(...) {}
+            
+            if (slot < 0) slot = 0;
+            if (slot > 2) slot = 2;
+            
+            action_slot_t* actions = get_action_slot(slot);
+            if (actions && actions->count > 0) {
+                play_action(slot);
+                ESP_LOGI(TAG_MCP, "Playing saved action slot %d (%d steps)", slot, actions->count);
+                return std::string("Đang phát " + std::to_string(actions->count) + " động tác từ slot " + std::to_string(slot + 1));
+            } else {
+                ESP_LOGW(TAG_MCP, "Saved action slot %d is empty", slot);
+                return std::string("Slot " + std::to_string(slot + 1) + " chưa có động tác");
+            }
+        }
+    );
+    
+    // Play music from SD card
+    mcp_server.AddTool(
+        "self.music.play",
+        "Phát nhạc MP3 từ thẻ nhớ SD card. LLM có thể mở bài hát theo yêu cầu của người dùng.\n"
+        "song_name: Tên file nhạc (có thể có hoặc không có .mp3). VD: 'happy', 'birthday.mp3', 'music/pop/song1'\n"
+        "File phải nằm trong /sdcard/. VD: /sdcard/happy.mp3, /sdcard/music/song.mp3\n"
+        "⚠️ NÊN GỌI self.music.search TRƯỚC để tìm file chính xác!\n"
+        "Dùng khi người dùng nói 'mở bài...', 'phát nhạc...', 'play song...', 'bật nhạc...'",
+        PropertyList({
+            Property("song_name", kPropertyTypeString)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            std::string song_name;
+            try { 
+                song_name = properties["song_name"].value<std::string>(); 
+            } catch(...) {
+                ESP_LOGW(TAG_MCP, "Music play: missing song_name parameter");
+                return std::string("❌ Thiếu tên bài hát! Vui lòng cung cấp song_name.");
+            }
+            
+            if (song_name.empty()) {
+                ESP_LOGW(TAG_MCP, "Music play: empty song_name");
+                return std::string("❌ Tên bài hát không được rỗng!");
+            }
+            
+            ESP_LOGI(TAG_MCP, "Playing music: %s", song_name.c_str());
+            bool success = ninja_play_music(song_name.c_str());
+            
+            if (success) {
+                return std::string("🎵 Đang phát: " + song_name);
+            } else {
+                return std::string("❌ Không tìm thấy bài hát: " + song_name + ". Hãy dùng self.music.search trước!");
+            }
+        }
+    );
+    
+    // Search music files in SD card
+    mcp_server.AddTool(
+        "self.music.search",
+        "Tìm kiếm file nhạc MP3 trong thẻ nhớ SD card theo từ khóa (không phân biệt hoa thường).\n"
+        "keyword: Từ khóa tìm kiếm (VD: 'Xuân', 'happy', 'birthday')\n"
+        "Trả về danh sách file phù hợp. LLM nên gọi hàm này TRƯỚC self.music.play để tìm tên file chính xác.\n"
+        "Dùng khi người dùng muốn tìm hoặc phát nhạc nhưng chưa biết tên file chính xác.",
+        PropertyList({
+            Property("keyword", kPropertyTypeString)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            std::string keyword;
+            try { 
+                keyword = properties["keyword"].value<std::string>(); 
+            } catch(...) {
+                ESP_LOGW(TAG_MCP, "Music search: missing keyword parameter");
+                return std::string("❌ Thiếu từ khóa! Vui lòng cung cấp keyword.");
+            }
+            
+            if (keyword.empty()) {
+                ESP_LOGW(TAG_MCP, "Music search: empty keyword");
+                return std::string("❌ Từ khóa không được rỗng!");
+            }
+            
+            // Search with buffer size 2048, max 10 results
+            char result_buffer[2048];
+            int found_count = search_music_files_in_sdcard(keyword.c_str(), result_buffer, sizeof(result_buffer), 10);
+            
+            if (found_count == 0) {
+                ESP_LOGI(TAG_MCP, "Music search '%s': no results", keyword.c_str());
+                return std::string("🔍 Không tìm thấy file nào chứa từ khóa: " + keyword);
+            }
+            
+            ESP_LOGI(TAG_MCP, "Music search '%s': found %d files", keyword.c_str(), found_count);
+            
+            // Parse results (newline-separated paths)
+            std::string response = "🔍 Tìm thấy " + std::to_string(found_count) + " file:\n";
+            char* line = strtok(result_buffer, "\n");
+            int idx = 1;
+            while (line != NULL && idx <= found_count) {
+                response += std::to_string(idx) + ". " + std::string(line) + "\n";
+                line = strtok(NULL, "\n");
+                idx++;
+            }
+            response += "\nDùng self.music.play với đường dẫn đầy đủ từ kết quả trên.";
+            
+            return response;
+        }
+    );
+    
+    // Stop music playback
+    mcp_server.AddTool(
+        "self.music.stop",
+        "Dừng phát nhạc hiện tại. Dùng khi người dùng nói 'dừng nhạc', 'tắt nhạc', 'stop music'.",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            (void)properties;
+            
+            bool was_playing = ninja_is_music_playing();
+            ninja_stop_music();
+            
+            ESP_LOGI(TAG_MCP, "Music stopped");
+            if (was_playing) {
+                return std::string("🔇 Đã dừng phát nhạc");
+            } else {
+                return std::string("⏹️ Không có nhạc nào đang phát");
+            }
+        }
+    );
+    
+    // Play dead command
+    mcp_server.AddTool(
+        "self.robot.play_dead",
+        "Robot giả chết! Hiện emoji shock 😱, lùi 2 bước, nghiêng trái + xoay chân LF 360° theo 1 chiều trong 2s, nằm xuống (LL=155°) rồi về home. Dùng khi người dùng nói 'giả chết', 'chết đi', 'play dead', 'ngã xuống'.",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            (void)properties;
+            
+            // play_dead_task is defined in webserver.c, we call it via the HTTP endpoint pattern
+            // But since we can access servo/emoji directly, create the task inline
+            xTaskCreate([](void* arg) {
+                (void)arg;
+                control_state_t *state = get_control_state();
+                
+                // Step 1: Shocked emoji
+                set_robot_emoji("shocked");
+                vTaskDelay(pdMS_TO_TICKS(500));
+                
+                // Step 2: Walk backward
+                set_manual_mode(false);
+                ninja_set_walk();
+                state->j_y = -80;
+                state->j_x = 0;
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                state->j_y = 0;
+                state->j_x = 0;
+                vTaskDelay(pdMS_TO_TICKS(300));
+                
+                // Step 3: Tilt left (LL=100, RL=175), spin LF 360° in one direction (2000ms), wait 1500ms
+                set_manual_mode(true);
+                calibration_t *cal = get_calibration();
+                servo_attach(SERVO_CH_LEFT_LEG);
+                servo_attach(SERVO_CH_RIGHT_LEG);
+                servo_attach(SERVO_CH_LEFT_FOOT);
+                servo_write(SERVO_CH_LEFT_LEG, 100);
+                servo_write(SERVO_CH_RIGHT_LEG, 175);
+                vTaskDelay(pdMS_TO_TICKS(300));
+                
+                // Spin LF 360° in one direction (2000ms) - sweep from start to end, DO NOT return
+                int lf_center = cal->lf_neutral;
+                int rotation_steps = 20; // 20 steps for smooth rotation
+                int step_delay = 2000 / rotation_steps; // 100ms per step
+                for (int i = 0; i <= rotation_steps; i++) {
+                    // Sweep from center-90 to center+90 (180° range) in ONE direction
+                    int angle = lf_center - 90 + (i * 180 / rotation_steps);
+                    servo_write(SERVO_CH_LEFT_FOOT, angle);
+                    vTaskDelay(pdMS_TO_TICKS(step_delay));
+                }
+                // DO NOT return to center - stay at final position (center+90)
+                // Wait 1500ms before next action
+                vTaskDelay(pdMS_TO_TICKS(1500));
+                
+                // Step 4: Lie down (tilt left with LL=155)
+                set_manual_mode(true);
+                servo_attach(SERVO_CH_LEFT_LEG);
+                servo_attach(SERVO_CH_RIGHT_LEG);
+                servo_write(SERVO_CH_LEFT_FOOT, lf_center); // Reset foot position first
+                vTaskDelay(pdMS_TO_TICKS(100));
+                servo_write(SERVO_CH_LEFT_LEG, 155);
+                servo_write(SERVO_CH_RIGHT_LEG, 175);
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                
+                set_manual_mode(false);
+                go_home();
+                vTaskDelay(pdMS_TO_TICKS(500));
+                set_robot_emoji("neutral");
+                
+                vTaskDelete(NULL);
+            }, "mcp_playdead", 3072, NULL, 5, NULL);
+            
+            ESP_LOGI(TAG_MCP, "Play Dead triggered");
+            return std::string("Robot đang giả chết! 😱 Shock → Lùi 2 bước → Ngã trái + Xoay chân 360° (2s) → Nằm xuống → Home 😶");
+        }
+    );
+    
+    ESP_LOGI(TAG_MCP, "Robot MCP tools registered (18 tools: 12 robot + 3 alarm/slot/playdead + 3 music)");
 }
 
 #endif // ROBOT_MCP_CONTROLLER_H

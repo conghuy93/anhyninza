@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <math.h>
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "webserver.h"
@@ -51,18 +52,18 @@ static void web_action_task(void *pvParameters) {
     
     switch (params->task_type) {
         case WEB_TASK_TEST_BOTH_FEET:
-            ESP_LOGI(TAG, "🔧 Background task: TEST_BOTH_FEET");
+            ESP_LOGI(TAG, "[BG] Background task: TEST_BOTH_FEET");
             test_both_feet();
             break;
             
         case WEB_TASK_COMBO1:
-            ESP_LOGI(TAG, "🔧 Background task: COMBO1 (LF speed=%dms)", params->param1);
+            ESP_LOGI(TAG, "[BG] Background task: COMBO1 (LF speed=%dms)", params->param1);
             cal->combo_lf_speed = params->param1;
             ninja_combo1();
             break;
             
         case WEB_TASK_COMBO2:
-            ESP_LOGI(TAG, "🔧 Background task: COMBO2 (RF speed=%dms)", params->param1);
+            ESP_LOGI(TAG, "[BG] Background task: COMBO2 (RF speed=%dms)", params->param1);
             cal->combo_rf_speed = params->param1;
             ninja_combo2();
             break;
@@ -73,7 +74,7 @@ static void web_action_task(void *pvParameters) {
             control_state_t *state = get_control_state();
             cal->turn_left_speed = speed_ms;
             
-            ESP_LOGI(TAG, "🔧 Background task: TURN_LEFT (Mode=%s, Speed=%dms)", 
+            ESP_LOGI(TAG, "[BG] Background task: TURN_LEFT (Mode=%s, Speed=%dms)", 
                      mode == MODE_WALK ? "WALK" : "ROLL", speed_ms);
             
             if (mode == MODE_WALK) {
@@ -104,7 +105,7 @@ static void web_action_task(void *pvParameters) {
             control_state_t *state = get_control_state();
             cal->turn_right_speed = speed_ms;
             
-            ESP_LOGI(TAG, "🔧 Background task: TURN_RIGHT (Mode=%s, Speed=%dms)", 
+            ESP_LOGI(TAG, "[BG] Background task: TURN_RIGHT (Mode=%s, Speed=%dms)", 
                      mode == MODE_WALK ? "WALK" : "ROLL", speed_ms);
             
             if (mode == MODE_WALK) {
@@ -130,18 +131,18 @@ static void web_action_task(void *pvParameters) {
         }
         
         case WEB_TASK_RHYTHM_LEFT:
-            ESP_LOGI(TAG, "🔧 Background task: LEFT LEG RHYTHM (34-45-65 x3)");
+            ESP_LOGI(TAG, "[BG] Background task: LEFT LEG RHYTHM (34-45-65 x3)");
             left_leg_rhythm();
             break;
             
         case WEB_TASK_RHYTHM_RIGHT:
-            ESP_LOGI(TAG, "🔧 Background task: RIGHT LEG RHYTHM (140-150-170 x3)");
+            ESP_LOGI(TAG, "[BG] Background task: RIGHT LEG RHYTHM (140-150-170 x3)");
             right_leg_rhythm();
             break;
             
         case WEB_TASK_WALK_PHASE: {
             int combo = params->param1;
-            ESP_LOGI(TAG, "🔧 Background task: WALK COMBO %d", combo);
+            ESP_LOGI(TAG, "[BG] Background task: WALK COMBO %d", combo);
             if (combo == 1) {
                 ninja_walk_combo_123();  // Phases 1+2+3
             } else if (combo == 2) {
@@ -162,7 +163,7 @@ static void web_action_task(void *pvParameters) {
         }
 
         case WEB_TASK_WAVE_RIGHT_LEG: {
-            ESP_LOGI(TAG, "🦵 Background task: WAVE RIGHT LEG");
+            ESP_LOGI(TAG, "[LEG] Background task: WAVE RIGHT LEG");
             control_state_t *st = get_control_state();
             st->manual_mode = true;
             servo_attach(SERVO_CH_RIGHT_LEG);
@@ -178,7 +179,7 @@ static void web_action_task(void *pvParameters) {
         }
 
         case WEB_TASK_WAVE_LEFT_LEG: {
-            ESP_LOGI(TAG, "🦵 Background task: WAVE LEFT LEG");
+            ESP_LOGI(TAG, "[LEG] Background task: WAVE LEFT LEG");
             control_state_t *st2 = get_control_state();
             st2->manual_mode = true;
             servo_attach(SERVO_CH_LEFT_LEG);
@@ -262,24 +263,24 @@ static const char html_content[] =
 "</style>"
 "</head>"
 "<body>"
-"<h1>🤖 miniZninja</h1>"
+"<h1>&#x1F916; miniZninja</h1>"
 "<div class=\"tabs\">"
-"<button class=\"tab active\" onclick=\"switchTab(1)\">🎮 Điều Khiển</button>"
+"<button class=\"tab active\" onclick=\"switchTab(1)\">&#x1F3AE; Điều Khiển</button>"
 "<button class=\"tab\" onclick=\"switchTab(2)\">⚙️ Cài Đặt</button>"
-"<button class=\"tab\" onclick=\"switchTab(3)\">🎵 Nhạc</button>"
-"<button class=\"tab\" onclick=\"switchTab(4)\">📂 SD Card</button>"
-"<button class=\"tab\" onclick=\"switchTab(5)\">💬 Chat AI</button>"
+"<button class=\"tab\" onclick=\"switchTab(3)\">&#x1F3B5; Nhạc</button>"
+"<button class=\"tab\" onclick=\"switchTab(4)\">&#x1F4C2; SD Card</button>"
+"<button class=\"tab\" onclick=\"switchTab(5)\">&#x1F4AC; Chat AI</button>"
 "<button class=\"tab\" onclick=\"switchTab(6)\">⏰ Hẹn giờ</button>"
 "</div>"
 "<div id=\"tab1\" class=\"tab-content active\">"
 "<div style=\"background:#1a252f;padding:8px;border-radius:6px;margin:5px 0 10px 0;font-size:11px;line-height:1.5;\">"
-"<div style=\"color:#3498db;font-weight:bold;margin-bottom:4px;\">📱 Hướng dẫn điều khiển:</div>"
+"<div style=\"color:#3498db;font-weight:bold;margin-bottom:4px;\">&#x1F4F1; Hướng dẫn điều khiển:</div>"
 "<div style=\"color:#bdc3c7;margin-bottom:2px;\">• <b>Joystick giữa</b>: Kéo để di chuyển tiến/lùi/rẽ trái/phải</div>"
 "<div style=\"color:#bdc3c7;margin-bottom:2px;\">• <b>↺/↻ (bên cạnh)</b>: Quay trái/phải tại chỗ (kéo thanh dọc để điều tốc độ)</div>"
-"<div style=\"color:#bdc3c7;margin-bottom:2px;\">• <b>🚶 WALK / ⚙️ ROLL</b>: Chuyển chế độ đi bộ/lăn xe</div>"
-"<div style=\"color:#bdc3c7;margin-bottom:2px;\">• <b>👈 L.Arm / 👉 R.Arm</b>: Vẫy tay trái/phải (giữ để vẫy liên tục)</div>"
-"<div style=\"color:#bdc3c7;margin-bottom:2px;\">• <b>🏠 HOME</b>: Về tư thế ban đầu, <b>❌ Off</b>: Tắt chế độ thủ công</div>"
-"<div style=\"color:#e67e22;font-size:10px;margin-top:4px;\">💡 Combo 1/2 thực hiện động tác nghiêng + vẫy chân + xoay bánh xe</div>"
+"<div style=\"color:#bdc3c7;margin-bottom:2px;\">• <b>&#x1F6B6; WALK / ⚙️ ROLL</b>: Chuyển chế độ đi bộ/lăn xe</div>"
+"<div style=\"color:#bdc3c7;margin-bottom:2px;\">• <b>&#x1F448; L.Arm / &#x1F449; R.Arm</b>: Vẫy tay trái/phải (giữ để vẫy liên tục)</div>"
+"<div style=\"color:#bdc3c7;margin-bottom:2px;\">• <b>&#x1F3E0; HOME</b>: Về tư thế ban đầu, <b>❌ Off</b>: Tắt chế độ thủ công</div>"
+"<div style=\"color:#e67e22;font-size:10px;margin-top:4px;\">&#x1F4A1; Combo 1/2 thực hiện động tác nghiêng + vẫy chân + xoay bánh xe</div>"
 "</div>"
 "<div style=\"display:flex;align-items:flex-start;justify-content:center;gap:8px;margin:5px auto\">"  
 "<div style=\"text-align:center\">"  
@@ -326,7 +327,7 @@ static const char html_content[] =
 "<button class=\"btn\" style=\"background:#9c27b0\" id=\"btnTiltRight\">➡️ Tilt R</button>"
 "</div>"
 "<div class=\"calibration\" style=\"margin-top:10px;background:#1a2530;border:2px solid #9c27b0;padding:10px\">"
-"<h2 style=\"color:#9c27b0;font-size:0.95em;margin-bottom:8px\">🔄 Quay Tại Chỗ (RF+LF Spin)</h2>"
+"<h2 style=\"color:#9c27b0;font-size:0.95em;margin-bottom:8px\">&#x1F504; Quay Tại Chỗ (RF+LF Spin)</h2>"
 "<div style=\"background:#2c3e50;padding:10px;border-radius:8px\">"
 "<div style=\"display:flex;align-items:center;gap:10px;margin-bottom:8px\">"
 "<label style=\"color:#e91e63;font-size:0.8em;min-width:50px\">↺ Trái</label>"
@@ -334,64 +335,70 @@ static const char html_content[] =
 "<label style=\"color:#9c27b0;font-size:0.8em;min-width:50px;text-align:right\">Phải ↻</label>"
 "</div>"
 "<div style=\"text-align:center;color:#3498db;font-size:0.85em;margin-bottom:8px\">Tốc độ: <span id=\"spinSpeedDisp\" style=\"font-weight:bold\">0</span></div>"
-"<button class=\"btn\" style=\"background:#9c27b0;width:100%;font-size:0.9em\" id=\"btnSpin\">🔄 SPIN</button>"
+"<button class=\"btn\" style=\"background:#9c27b0;width:100%;font-size:0.9em\" id=\"btnSpin\">&#x1F504; SPIN</button>"
 "<div style=\"font-size:0.6em;color:#7f8c8d;margin-top:5px;text-align:center\">Kéo thanh trượt sang trái (âm) để quay trái, sang phải (dương) để quay phải. Nhấn SPIN để dừng.</div>"
 "</div>"
 "</div>"
 "<div class=\"buttons\">"
-"<button class=\"btn\" style=\"background:#8e44ad\" id=\"btnRhythmL\">💃 L.Leg (34-45-65)</button>"
-"<button class=\"btn\" style=\"background:#2980b9\" id=\"btnRhythmR\">💃 R.Leg (140-150-170)</button>"
+"<button class=\"btn\" style=\"background:#8e44ad\" id=\"btnRhythmL\">&#x1F483; L.Leg (34-45-65)</button>"
+"<button class=\"btn\" style=\"background:#2980b9\" id=\"btnRhythmR\">&#x1F483; R.Leg (140-150-170)</button>"
 "</div>"
 "<div class=\"calibration\" style=\"margin-top:10px;background:#1a2530;border:2px solid #3498db;padding:10px\">"
-"<h2 style=\"color:#3498db;font-size:0.95em;margin-bottom:8px\">🚶 Walk Combos (Combo bước đi)</h2>"
+"<h2 style=\"color:#3498db;font-size:0.95em;margin-bottom:8px\">&#x1F6B6; Walk Combos (Combo bước đi)</h2>"
 "<div class=\"buttons\">"
-"<button class=\"btn\" style=\"background:#1abc9c;font-size:0.9em;padding:12px\" id=\"btnCombo123\">🎯 Combo 1-2-3<br><small style=\"font-size:0.7em;opacity:0.8\">(Tilt R → RF Fwd → Tilt L)</small></button>"
-"<button class=\"btn\" style=\"background:#2ecc71;font-size:0.9em;padding:12px\" id=\"btnCombo345\">🎯 Combo 3-4-5<br><small style=\"font-size:0.7em;opacity:0.8\">(Tilt L → LF Fwd → Neutral)</small></button>"
+"<button class=\"btn\" style=\"background:#1abc9c;font-size:0.9em;padding:12px\" id=\"btnCombo123\">&#x1F3AF; Combo 1-2-3<br><small style=\"font-size:0.7em;opacity:0.8\">(Tilt R → RF Fwd → Tilt L)</small></button>"
+"<button class=\"btn\" style=\"background:#2ecc71;font-size:0.9em;padding:12px\" id=\"btnCombo345\">&#x1F3AF; Combo 3-4-5<br><small style=\"font-size:0.7em;opacity:0.8\">(Tilt L → LF Fwd → Neutral)</small></button>"
 "</div>"
 "</div>"
 "<div class=\"calibration\" style=\"margin-top:10px;background:#1a2530;border:2px solid #ff5722;padding:10px\">"
-"<h2 style=\"color:#ff5722;font-size:0.95em;margin-bottom:8px\">🎯 COMBO (Tốc độ xoay chân)</h2>"
+"<h2 style=\"color:#ff5722;font-size:0.95em;margin-bottom:8px\">&#x1F3AF; COMBO (Tốc độ xoay chân)</h2>"
 "<div style=\"display:flex;gap:10px\">"
 "<div style=\"flex:1;background:#2c3e50;padding:8px;border-radius:8px;text-align:center\">"
 "<label style=\"color:#ff5722;font-size:0.7em;display:block;margin-bottom:3px\">LF: <span id=\"comboLfSpeedDisp\">1000</span>ms</label>"
 "<input type=\"range\" min=\"200\" max=\"3000\" value=\"1000\" id=\"comboLfSpeed\" style=\"width:100%\">"
-"<button class=\"btn\" style=\"background:#ff5722;font-size:0.8em;padding:10px;margin-top:5px;width:100%\" id=\"btnCombo1\">🎯 COMBO 1</button>"
+"<button class=\"btn\" style=\"background:#ff5722;font-size:0.8em;padding:10px;margin-top:5px;width:100%\" id=\"btnCombo1\">&#x1F3AF; COMBO 1</button>"
 "</div>"
 "<div style=\"flex:1;background:#2c3e50;padding:8px;border-radius:8px;text-align:center\">"
 "<label style=\"color:#00bcd4;font-size:0.7em;display:block;margin-bottom:3px\">RF: <span id=\"comboRfSpeedDisp\">1000</span>ms</label>"
 "<input type=\"range\" min=\"200\" max=\"3000\" value=\"1000\" id=\"comboRfSpeed\" style=\"width:100%\">"
-"<button class=\"btn\" style=\"background:#00bcd4;font-size:0.8em;padding:10px;margin-top:5px;width:100%\" id=\"btnCombo2\">🎯 COMBO 2</button>"
+"<button class=\"btn\" style=\"background:#00bcd4;font-size:0.8em;padding:10px;margin-top:5px;width:100%\" id=\"btnCombo2\">&#x1F3AF; COMBO 2</button>"
 "</div>"
 "</div>"
 "</div>"
 "<div class=\"calibration\" style=\"margin-top:8px;background:#1a2530;border:2px solid #e91e63;padding:10px\">"
-"<h2 style=\"color:#e91e63;font-size:0.95em;margin-bottom:8px\">🦵 Wave Legs (Vẫy chân)</h2>"
+"<h2 style=\"color:#e91e63;font-size:0.95em;margin-bottom:8px\">&#x1F9B5; Wave Legs (Vẫy chân)</h2>"
 "<div class=\"buttons\">"
-"<button class=\"btn\" style=\"background:#e91e63;font-size:0.9em;padding:12px\" id=\"btnWaveRight\">🦵 Vẫy chân phải<br><small style=\"font-size:0.7em;opacity:0.8\">(Nghiêng trái → Vẫy RL x3)</small></button>"
-"<button class=\"btn\" style=\"background:#9c27b0;font-size:0.9em;padding:12px\" id=\"btnWaveLeft\">🦵 Vẫy chân trái<br><small style=\"font-size:0.7em;opacity:0.8\">(Nghiêng phải → Vẫy LL x3)</small></button>"
+"<button class=\"btn\" style=\"background:#e91e63;font-size:0.9em;padding:12px\" id=\"btnWaveRight\">&#x1F9B5; Vẫy chân phải<br><small style=\"font-size:0.7em;opacity:0.8\">(Nghiêng trái → Vẫy RL x3)</small></button>"
+"<button class=\"btn\" style=\"background:#9c27b0;font-size:0.9em;padding:12px\" id=\"btnWaveLeft\">&#x1F9B5; Vẫy chân trái<br><small style=\"font-size:0.7em;opacity:0.8\">(Nghiêng phải → Vẫy LL x3)</small></button>"
+"</div>"
+"</div>"
+"<div class=\"calibration\" style=\"margin-top:8px;background:#1a2530;border:2px solid #c0392b;padding:10px\">"
+"<h2 style=\"color:#c0392b;font-size:0.95em;margin-bottom:8px\">&#x1F480; Giả Chết (Play Dead)</h2>"
+"<div class=\"buttons\">"
+"<button class=\"btn\" style=\"background:#c0392b;font-size:1em;padding:14px;width:100%\" id=\"btnPlayDead\">&#x1F480; GIẢ CHẾT<br><small style=\"font-size:0.7em;opacity:0.8\">(Shock → Lùi → Ngã → Nằm)</small></button>"
 "</div>"
 "</div>"
 "<div class=\"calibration\" style=\"margin-top:8px;background:#1a2530;border:2px solid #e67e22;padding:10px\">"
-"<h2 style=\"color:#e67e22;font-size:1em;margin-bottom:8px\">🎬 Recording</h2>"
+"<h2 style=\"color:#e67e22;font-size:1em;margin-bottom:8px\">&#x1F3AC; Recording</h2>"
 "<div style=\"display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px\">"
 "<div style=\"background:#2c3e50;padding:8px;border-radius:8px;text-align:center\">"
 "<div style=\"font-weight:bold;color:#3498db;font-size:0.9em;margin-bottom:4px\">Slot 1</div>"
 "<div style=\"font-size:0.75em;color:#7f8c8d;margin-bottom:6px\" id=\"slot1Info\">-</div>"
-"<button class=\"btn\" style=\"background:#e74c3c;font-size:1.2em;padding:10px 6px;width:100%;margin-bottom:4px;min-height:44px;border-radius:8px\" id=\"btnRec1\">🔴 REC</button>"
+"<button class=\"btn\" style=\"background:#e74c3c;font-size:1.2em;padding:10px 6px;width:100%;margin-bottom:4px;min-height:44px;border-radius:8px\" id=\"btnRec1\">&#x1F534; REC</button>"
 "<button class=\"btn\" style=\"background:#7f8c8d;font-size:1.2em;padding:10px 6px;width:100%;margin-bottom:4px;min-height:44px;border-radius:8px\" id=\"btnStop1\">⏹ STOP</button>"
 "<button class=\"btn\" style=\"background:#27ae60;font-size:1.2em;padding:10px 6px;width:100%;min-height:44px;border-radius:8px\" id=\"btnPlay1\">▶️ PLAY</button>"
 "</div>"
 "<div style=\"background:#2c3e50;padding:8px;border-radius:8px;text-align:center\">"
 "<div style=\"font-weight:bold;color:#e74c3c;font-size:0.9em;margin-bottom:4px\">Slot 2</div>"
 "<div style=\"font-size:0.75em;color:#7f8c8d;margin-bottom:6px\" id=\"slot2Info\">-</div>"
-"<button class=\"btn\" style=\"background:#e74c3c;font-size:1.2em;padding:10px 6px;width:100%;margin-bottom:4px;min-height:44px;border-radius:8px\" id=\"btnRec2\">🔴 REC</button>"
+"<button class=\"btn\" style=\"background:#e74c3c;font-size:1.2em;padding:10px 6px;width:100%;margin-bottom:4px;min-height:44px;border-radius:8px\" id=\"btnRec2\">&#x1F534; REC</button>"
 "<button class=\"btn\" style=\"background:#7f8c8d;font-size:1.2em;padding:10px 6px;width:100%;margin-bottom:4px;min-height:44px;border-radius:8px\" id=\"btnStop2\">⏹ STOP</button>"
 "<button class=\"btn\" style=\"background:#27ae60;font-size:1.2em;padding:10px 6px;width:100%;min-height:44px;border-radius:8px\" id=\"btnPlay2\">▶️ PLAY</button>"
 "</div>"
 "<div style=\"background:#2c3e50;padding:8px;border-radius:8px;text-align:center\">"
 "<div style=\"font-weight:bold;color:#9b59b6;font-size:0.9em;margin-bottom:4px\">Slot 3</div>"
 "<div style=\"font-size:0.75em;color:#7f8c8d;margin-bottom:6px\" id=\"slot3Info\">-</div>"
-"<button class=\"btn\" style=\"background:#e74c3c;font-size:1.2em;padding:10px 6px;width:100%;margin-bottom:4px;min-height:44px;border-radius:8px\" id=\"btnRec3\">🔴 REC</button>"
+"<button class=\"btn\" style=\"background:#e74c3c;font-size:1.2em;padding:10px 6px;width:100%;margin-bottom:4px;min-height:44px;border-radius:8px\" id=\"btnRec3\">&#x1F534; REC</button>"
 "<button class=\"btn\" style=\"background:#7f8c8d;font-size:1.2em;padding:10px 6px;width:100%;margin-bottom:4px;min-height:44px;border-radius:8px\" id=\"btnStop3\">⏹ STOP</button>"
 "<button class=\"btn\" style=\"background:#27ae60;font-size:1.2em;padding:10px 6px;width:100%;min-height:44px;border-radius:8px\" id=\"btnPlay3\">▶️ PLAY</button>"
 "</div>"
@@ -399,15 +406,15 @@ static const char html_content[] =
 "<div id=\"recStatus\" style=\"padding:8px;background:#34495e;border-radius:6px;font-size:0.85em;color:#27ae60;font-weight:bold\">⏸️ Ready</div>"
 "</div>"
 "<div class=\"calibration\" style=\"margin-top:8px;background:#1a2530;border:2px solid #1abc9c;padding:10px\">"
-"<h2 style=\"color:#1abc9c;font-size:0.95em;margin-bottom:8px\">📦 Export / Import Actions (JSON)</h2>"
+"<h2 style=\"color:#1abc9c;font-size:0.95em;margin-bottom:8px\">&#x1F4E6; Export / Import Actions (JSON)</h2>"
 "<div class=\"buttons\" style=\"margin-bottom:8px\">"
-"<button class=\"btn\" style=\"background:#16a085;font-size:0.85em;padding:10px\" id=\"btnExport1\">📤 Export Slot 1</button>"
-"<button class=\"btn\" style=\"background:#1abc9c;font-size:0.85em;padding:10px\" id=\"btnExport2\">📤 Export Slot 2</button>"
-"<button class=\"btn\" style=\"background:#2ecc71;font-size:0.85em;padding:10px\" id=\"btnExport3\">📤 Export Slot 3</button>"
-"<button class=\"btn\" style=\"background:#27ae60;font-size:0.85em;padding:10px\" id=\"btnImport\">📥 Import JSON</button>"
+"<button class=\"btn\" style=\"background:#16a085;font-size:0.85em;padding:10px\" id=\"btnExport1\">&#x1F4E4; Export Slot 1</button>"
+"<button class=\"btn\" style=\"background:#1abc9c;font-size:0.85em;padding:10px\" id=\"btnExport2\">&#x1F4E4; Export Slot 2</button>"
+"<button class=\"btn\" style=\"background:#2ecc71;font-size:0.85em;padding:10px\" id=\"btnExport3\">&#x1F4E4; Export Slot 3</button>"
+"<button class=\"btn\" style=\"background:#27ae60;font-size:0.85em;padding:10px\" id=\"btnImport\">&#x1F4E5; Import JSON</button>"
 "</div>"
 "<div style=\"background:#2c3e50;padding:8px;border-radius:6px\">"
-"<label style=\"color:#1abc9c;font-size:0.7em;display:block;margin-bottom:4px\">📝 JSON Data:</label>"
+"<label style=\"color:#1abc9c;font-size:0.7em;display:block;margin-bottom:4px\">&#x1F4DD; JSON Data:</label>"
 "<textarea id=\"jsonArea\" rows=\"4\" style=\"width:100%;background:#1a252f;color:#ecf0f1;border:1px solid #1abc9c;border-radius:4px;padding:6px;font-family:monospace;font-size:0.7em;resize:vertical\" placeholder=\"Export sẽ hiện JSON ở đây. Hoặc paste JSON vào đây rồi nhấn Import...\"></textarea>"
 "<div style=\"display:flex;gap:6px;margin-top:6px\">"
 "<label style=\"color:#95a5a6;font-size:0.65em;white-space:nowrap;align-self:center\">Import vào Slot:</label>"
@@ -421,7 +428,7 @@ static const char html_content[] =
 "<div id=\"jsonStatus\" style=\"padding:6px;font-size:0.75em;color:#1abc9c;margin-top:6px\"></div>"
 "</div>"
 "<div class=\"calibration\" style=\"margin-top:6px;background:#1a2530;border:2px solid #f39c12;padding:8px\">"
-"<h2 style=\"color:#f39c12;font-size:0.85em;margin-bottom:6px\">🔋 Battery Alert (Cảnh báo pin)</h2>"
+"<h2 style=\"color:#f39c12;font-size:0.85em;margin-bottom:6px\">&#x1F50B; Battery Alert (Cảnh báo pin)</h2>"
 "<div style=\"display:flex;align-items:center;justify-content:space-between;background:#2c3e50;padding:8px;border-radius:6px\">"
 "<div style=\"flex:1\">"
 "<div style=\"color:#ecf0f1;font-size:0.8em;font-weight:bold\">Popup & Sound</div>"
@@ -434,16 +441,16 @@ static const char html_content[] =
 "</div>"
 "</div>"
 "<div class=\"calibration\" style=\"margin-top:6px;background:#1a2530;border:2px solid #9b59b6;padding:8px\">"
-"<h2 style=\"color:#9b59b6;font-size:0.85em;margin-bottom:6px\">🌈 LED Control (8 LED)</h2>"
+"<h2 style=\"color:#9b59b6;font-size:0.85em;margin-bottom:6px\">&#x1F308; LED Control (8 LED)</h2>"
 "<div class=\"cal-item\">"
-"<label>🎨 Màu sắc</label>"
+"<label>&#x1F3A8; Màu sắc</label>"
 "<div class=\"cal-row\" style=\"gap:8px\">"
 "<input type=\"color\" id=\"ledColor\" value=\"#ffffff\" style=\"width:50px;height:30px;border:none;cursor:pointer\">"
 "<span class=\"cal-value\" id=\"ledColorDisp\">#FFFFFF</span>"
 "</div>"
 "</div>"
 "<div class=\"cal-item\">"
-"<label>💡 Độ sáng</label>"
+"<label>&#x1F4A1; Độ sáng</label>"
 "<div class=\"cal-row\"><input type=\"range\" id=\"ledBrightness\" min=\"0\" max=\"255\" value=\"128\"><span class=\"cal-value\" id=\"ledBrightnessDisp\">128</span></div>"
 "</div>"
 "<div class=\"cal-item\">"
@@ -451,34 +458,34 @@ static const char html_content[] =
 "<div class=\"cal-row\"><input type=\"range\" id=\"ledSpeed\" min=\"10\" max=\"500\" value=\"50\"><span class=\"cal-value\" id=\"ledSpeedDisp\">50</span></div>"
 "</div>"
 "<div class=\"cal-item\">"
-"<label>🎯 Chế độ LED</label>"
+"<label>&#x1F3AF; Chế độ LED</label>"
 "<div class=\"buttons\" style=\"flex-wrap:wrap;gap:4px\">"
 "<button class=\"btn led-mode-btn\" data-mode=\"0\" style=\"background:#7f8c8d;font-size:0.65em;padding:4px 8px\">❌ Tắt</button>"
-"<button class=\"btn led-mode-btn active\" data-mode=\"1\" style=\"background:#3498db;font-size:0.65em;padding:4px 8px\">💎 Solid</button>"
-"<button class=\"btn led-mode-btn\" data-mode=\"2\" style=\"background:#e74c3c;font-size:0.65em;padding:4px 8px\">🌈 Rainbow</button>"
-"<button class=\"btn led-mode-btn\" data-mode=\"3\" style=\"background:#27ae60;font-size:0.65em;padding:4px 8px\">💨 Breathing</button>"
-"<button class=\"btn led-mode-btn\" data-mode=\"4\" style=\"background:#f39c12;font-size:0.65em;padding:4px 8px\">🏃 Chase</button>"
+"<button class=\"btn led-mode-btn active\" data-mode=\"1\" style=\"background:#3498db;font-size:0.65em;padding:4px 8px\">&#x1F48E; Solid</button>"
+"<button class=\"btn led-mode-btn\" data-mode=\"2\" style=\"background:#e74c3c;font-size:0.65em;padding:4px 8px\">&#x1F308; Rainbow</button>"
+"<button class=\"btn led-mode-btn\" data-mode=\"3\" style=\"background:#27ae60;font-size:0.65em;padding:4px 8px\">&#x1F4A8; Breathing</button>"
+"<button class=\"btn led-mode-btn\" data-mode=\"4\" style=\"background:#f39c12;font-size:0.65em;padding:4px 8px\">&#x1F3C3; Chase</button>"
 "<button class=\"btn led-mode-btn\" data-mode=\"5\" style=\"background:#9b59b6;font-size:0.65em;padding:4px 8px\">⚡ Blink</button>"
-"<button class=\"btn led-mode-btn\" data-mode=\"11\" style=\"background:linear-gradient(135deg,#e74c3c,#f39c12,#27ae60,#3498db);font-size:0.65em;padding:4px 8px\">🎵 Music</button>"
+"<button class=\"btn led-mode-btn\" data-mode=\"11\" style=\"background:linear-gradient(135deg,#e74c3c,#f39c12,#27ae60,#3498db);font-size:0.65em;padding:4px 8px\">&#x1F3B5; Music</button>"
 "</div>"
 "</div>"
 "<div class=\"buttons\" style=\"margin-top:8px\">"
-"<button class=\"btn-apply\" id=\"btnSaveLed\" style=\"background:#9b59b6\">💾 Lưu LED</button>"
+"<button class=\"btn-apply\" id=\"btnSaveLed\" style=\"background:#9b59b6\">&#x1F4BE; Lưu LED</button>"
 "</div>"
 "<div class=\"buttons\" style=\"margin-top:6px;gap:4px\">"
-"<button class=\"btn\" style=\"background:#e74c3c;font-size:0.7em;padding:5px\" data-color=\"#ff0000\">🔴</button>"
-"<button class=\"btn\" style=\"background:#27ae60;font-size:0.7em;padding:5px\" data-color=\"#00ff00\">🟢</button>"
-"<button class=\"btn\" style=\"background:#3498db;font-size:0.7em;padding:5px\" data-color=\"#0000ff\">🔵</button>"
-"<button class=\"btn\" style=\"background:#f1c40f;font-size:0.7em;padding:5px\" data-color=\"#ffff00\">🟡</button>"
-"<button class=\"btn\" style=\"background:#9b59b6;font-size:0.7em;padding:5px\" data-color=\"#ff00ff\">🟣</button>"
-"<button class=\"btn\" style=\"background:#1abc9c;font-size:0.7em;padding:5px\" data-color=\"#00ffff\">🩵</button>"
+"<button class=\"btn\" style=\"background:#e74c3c;font-size:0.7em;padding:5px\" data-color=\"#ff0000\">&#x1F534;</button>"
+"<button class=\"btn\" style=\"background:#27ae60;font-size:0.7em;padding:5px\" data-color=\"#00ff00\">&#x1F7E2;</button>"
+"<button class=\"btn\" style=\"background:#3498db;font-size:0.7em;padding:5px\" data-color=\"#0000ff\">&#x1F535;</button>"
+"<button class=\"btn\" style=\"background:#f1c40f;font-size:0.7em;padding:5px\" data-color=\"#ffff00\">&#x1F7E1;</button>"
+"<button class=\"btn\" style=\"background:#9b59b6;font-size:0.7em;padding:5px\" data-color=\"#ff00ff\">&#x1F7E3;</button>"
+"<button class=\"btn\" style=\"background:#1abc9c;font-size:0.7em;padding:5px\" data-color=\"#00ffff\">&#x1FA75;</button>"
 "<button class=\"btn\" style=\"background:#ecf0f1;color:#2c3e50;font-size:0.7em;padding:5px\" data-color=\"#ffffff\">⚪</button>"
 "</div>"
 "</div>"
 "</div>"
 "<div id=\"tab3\" class=\"tab-content\">"
 "<div class=\"calibration\" style=\"max-width:420px;margin:8px auto;background:#1a2530;border:2px solid #e91e63;padding:12px\">"
-"<h2 style=\"color:#e91e63;font-size:1em;margin-bottom:10px\">🎵 Stream Nhạc Online</h2>"
+"<h2 style=\"color:#e91e63;font-size:1em;margin-bottom:10px\">&#x1F3B5; Stream Nhạc Online</h2>"
 "<div style=\"display:flex;gap:6px;margin-bottom:10px\">"
 "<input type=\"text\" id=\"musicSearch\" placeholder=\"Tên bài hát...\" style=\"flex:1;padding:10px;border:2px solid #3498db;border-radius:8px;background:#2c3e50;color:#ecf0f1;font-size:0.9em\">"
 "</div>"
@@ -486,7 +493,7 @@ static const char html_content[] =
 "<input type=\"text\" id=\"musicArtist\" placeholder=\"Ca sĩ (tuỳ chọn)...\" style=\"flex:1;padding:8px;border:2px solid #7f8c8d;border-radius:8px;background:#2c3e50;color:#ecf0f1;font-size:0.85em\">"
 "</div>"
 "<div style=\"display:flex;gap:6px;margin-bottom:10px\">"
-"<button class=\"btn\" style=\"background:#e91e63;flex:1;font-size:0.9em;padding:12px\" id=\"btnMusicPlay\">🔍 Tìm &amp; Phát</button>"
+"<button class=\"btn\" style=\"background:#e91e63;flex:1;font-size:0.9em;padding:12px\" id=\"btnMusicPlay\">&#x1F50D; Tìm &amp; Phát</button>"
 "<button class=\"btn\" style=\"background:#e74c3c;flex:1;font-size:0.9em;padding:12px\" id=\"btnMusicStop\">⏹ Dừng</button>"
 "</div>"
 "<div id=\"musicInfo\" style=\"background:#2c3e50;border-radius:8px;padding:10px;margin-bottom:10px;min-height:60px\">"
@@ -501,17 +508,17 @@ static const char html_content[] =
 "<div id=\"lyricNext\" style=\"color:#546e7a;font-size:0.75em\"></div>"
 "</div>"
 "<div style=\"margin-top:10px;background:#2c3e50;border-radius:8px;padding:8px\">"
-"<label style=\"color:#7f8c8d;font-size:0.7em;display:block;margin-bottom:4px\">🌐 Server URL:</label>"
+"<label style=\"color:#7f8c8d;font-size:0.7em;display:block;margin-bottom:4px\">&#x1F310; Server URL:</label>"
 "<div style=\"display:flex;gap:6px\">"
 "<input type=\"text\" id=\"musicServerUrl\" placeholder=\"http://server:port\" style=\"flex:1;padding:6px;border:1px solid #34495e;border-radius:6px;background:#1a252f;color:#bdc3c7;font-size:0.7em\">"
-"<button class=\"btn\" style=\"background:#34495e;font-size:0.7em;padding:6px 10px\" id=\"btnSetServer\">💾</button>"
+"<button class=\"btn\" style=\"background:#34495e;font-size:0.7em;padding:6px 10px\" id=\"btnSetServer\">&#x1F4BE;</button>"
 "</div>"
 "</div>"
 "</div>"
 "</div>"
 "<div id=\"tab4\" class=\"tab-content\">"
 "<div class=\"calibration\" style=\"max-width:420px;margin:8px auto;background:#1a2530;border:2px solid #ff9800;padding:12px\">"
-"<h2 style=\"color:#ff9800;font-size:1em;margin-bottom:10px\">📂 Nhạc Thẻ Nhớ SD</h2>"
+"<h2 style=\"color:#ff9800;font-size:1em;margin-bottom:10px\">&#x1F4C2; Nhạc Thẻ Nhớ SD</h2>"
 "<div id=\"sdStatus\" style=\"color:#7f8c8d;font-size:0.8em;margin-bottom:8px\">Đang tải...</div>"
 "<div id=\"sdBrowser\" style=\"background:#2c3e50;border-radius:8px;padding:8px;margin-bottom:10px;max-height:300px;overflow-y:auto\">"
 "<div id=\"sdPath\" style=\"color:#ff9800;font-size:0.75em;margin-bottom:6px;font-family:monospace\">/sdcard</div>"
@@ -527,7 +534,7 @@ static const char html_content[] =
 "<button class=\"btn\" style=\"background:#7f8c8d;flex:1;font-size:0.8em;padding:8px\" id=\"btnSdNext\">Tiếp ⏭</button>"
 "</div>"
 "<div style=\"display:flex;gap:8px;margin-bottom:10px;align-items:center\">"
-"<span style=\"color:#7f8c8d;font-size:0.8em\">🔁 Lặp lại:</span>"
+"<span style=\"color:#7f8c8d;font-size:0.8em\">&#x1F501; Lặp lại:</span>"
 "<select id=\"sdRepeatMode\" style=\"flex:1;padding:6px;border:2px solid #9b59b6;border-radius:6px;background:#2c3e50;color:#ecf0f1;font-size:0.8em\">"
 "<option value=\"0\">Không lặp</option>"
 "<option value=\"1\">Lặp 1 bài</option>"
@@ -541,7 +548,7 @@ static const char html_content[] =
 "<hr style=\"border-color:#34495e;margin:12px 0\">"
 "<h3 style=\"color:#2ecc71;font-size:0.9em;margin-bottom:8px\">Upload MP3</h3>"
 "<div id=\"sdDropZone\" style=\"border:2px dashed #7f8c8d;border-radius:8px;padding:12px;margin-bottom:8px;text-align:center;cursor:pointer;background:#1a252f;transition:all 0.3s\">"
-"<div style=\"color:#7f8c8d;font-size:0.8em;margin-bottom:6px\">📁 Kéo thả file hoặc chọn file</div>"
+"<div style=\"color:#7f8c8d;font-size:0.8em;margin-bottom:6px\">&#x1F4C1; Kéo thả file hoặc chọn file</div>"
 "<input type=\"file\" id=\"sdFileInput\" accept=\".mp3,.wav,.ogg,.flac\" multiple style=\"width:100%;font-size:0.75em;color:#ecf0f1;background:#2c3e50;border:1px solid #7f8c8d;border-radius:4px;padding:6px\">"
 "</div>"
 "<div id=\"sdFileListContainer\" style=\"display:none;background:#2c3e50;border-radius:8px;padding:8px;margin-bottom:8px\">"
@@ -893,6 +900,7 @@ static const char html_content[] =
 "document.getElementById('btnCombo345').onclick=()=>{const b=document.getElementById('btnCombo345');b.classList.add('running');fetch('/phase?id=2').finally(()=>b.classList.remove('running'));};"
 "document.getElementById('btnWaveRight').onclick=()=>{const b=document.getElementById('btnWaveRight');b.classList.add('running');fetch('/wave?leg=right').finally(()=>b.classList.remove('running'));};"
 "document.getElementById('btnWaveLeft').onclick=()=>{const b=document.getElementById('btnWaveLeft');b.classList.add('running');fetch('/wave?leg=left').finally(()=>b.classList.remove('running'));};"
+"document.getElementById('btnPlayDead').onclick=()=>{const b=document.getElementById('btnPlayDead');b.classList.add('running');b.innerHTML='&#x1F480; \u0110ang gi\u1ea3 ch\u1ebft...';fetch('/playdead').finally(()=>{b.classList.remove('running');b.innerHTML='&#x1F480; GI\u1ea2 CH\u1ebeT<br><small style=\\\"font-size:0.7em;opacity:0.8\\\">(Shock \u2192 L\u00f9i \u2192 Ng\u00e3 \u2192 N\u1eb1m)</small>';});};"
 "document.getElementById('btnExport1').onclick=()=>{fetch('/action_json?action=export&slot=0').then(r=>r.text()).then(t=>{document.getElementById('jsonArea').value=t;document.getElementById('jsonStatus').textContent='\u2705 Exported Slot 1';});};"
 "document.getElementById('btnExport2').onclick=()=>{fetch('/action_json?action=export&slot=1').then(r=>r.text()).then(t=>{document.getElementById('jsonArea').value=t;document.getElementById('jsonStatus').textContent='\u2705 Exported Slot 2';});};"
 "document.getElementById('btnExport3').onclick=()=>{fetch('/action_json?action=export&slot=2').then(r=>r.text()).then(t=>{document.getElementById('jsonArea').value=t;document.getElementById('jsonStatus').textContent='\u2705 Exported Slot 3';});};"
@@ -900,7 +908,7 @@ static const char html_content[] =
 "document.getElementById('btnManualOff').onclick=()=>{fb('btnManualOff');fetch('/manualoff');};"
 "let activeRecSlot=-1;"
 "for(let s=1;s<=3;s++){"
-"document.getElementById('btnRec'+s).onclick=()=>{fetch('/record?action=start&slot='+(s-1));document.getElementById('recStatus').innerHTML='🔴 Đang ghi Slot '+s+' (0/20) - Kéo servo sẽ tự ghi!';document.getElementById('recStatus').style.color='#e74c3c';activeRecSlot=s;document.querySelectorAll('[id^=btnRec]').forEach(b=>b.style.animation='');document.getElementById('btnRec'+s).style.animation='pulse 0.8s infinite';startRecordPoll();};"
+"document.getElementById('btnRec'+s).onclick=()=>{fetch('/record?action=start&slot='+(s-1));document.getElementById('recStatus').innerHTML='🔴 Đang ghi Slot '+s+' (0/100) - Kéo servo sẽ tự ghi!';document.getElementById('recStatus').style.color='#e74c3c';activeRecSlot=s;document.querySelectorAll('[id^=btnRec]').forEach(b=>b.style.animation='');document.getElementById('btnRec'+s).style.animation='pulse 0.8s infinite';startRecordPoll();};"
 "document.getElementById('btnStop'+s).onclick=()=>{fetch('/record?action=stop').then(r=>r.text()).then(t=>{document.getElementById('recStatus').innerHTML='⏸️ '+t;document.getElementById('recStatus').style.color='#27ae60';activeRecSlot=-1;document.querySelectorAll('[id^=btnRec]').forEach(b=>b.style.animation='');stopRecordPoll();updateSlotInfo();});};"
 "document.getElementById('btnPlay'+s).onclick=()=>{const b=document.getElementById('btnPlay'+s);b.classList.add('running');b.textContent='⏳ ...';fetch('/record?action=play&slot='+(s-1)).then(()=>{b.classList.remove('running');b.textContent='▶️ PLAY';}).catch(()=>{b.classList.remove('running');b.textContent='▶️ PLAY';});};"
 "}"
@@ -908,7 +916,7 @@ static const char html_content[] =
 "function startRecordPoll(){recordPollTimer=setInterval(updateSlotInfo,500);}"
 "function stopRecordPoll(){if(recordPollTimer){clearInterval(recordPollTimer);recordPollTimer=null;}}"
 "function updateSlotInfo(){fetch('/record?action=info').then(r=>r.json()).then(d=>{"
-"for(let i=0;i<3;i++){document.getElementById('slot'+(i+1)+'Info').textContent=d.slots[i]>0?d.slots[i]+'/20 actions':'Trống';}"
+"for(let i=0;i<3;i++){document.getElementById('slot'+(i+1)+'Info').textContent=d.slots[i]>0?d.slots[i]+'/'+d.max+' actions':'Trống';}"
 "if(d.recording){document.getElementById('recStatus').innerHTML='🔴 Đang ghi Slot '+(d.rec_slot+1)+' ('+d.rec_count+'/'+d.max+') - Kéo servo sẽ tự ghi!';}"
 "});}"
 "updateSlotInfo();"
@@ -1307,13 +1315,13 @@ static const char html_content[] =
 "}).catch(()=>{});}"
 "function toggleAlarm(idx,en){"
 "fetch('/alarm_toggle?idx='+idx+'&enabled='+(en?1:0)).then(r=>r.json()).then(d=>{"
-"if(d.ok){showAlarmStatus(en?'✅ Đã bật':'⏸ Đã tắt');}loadAlarms();"
-"}).catch(()=>showAlarmStatus('❌ Lỗi'));}"
+"if(d.ok){showAlarmStatus(en?'&#x2705; Đã bật':'&#x23F8; Đã tắt');}loadAlarms();"
+"}).catch(()=>showAlarmStatus('&#x274C; Lỗi'));}"
 "function deleteAlarm(idx){"
 "if(!confirm('Xóa hẹn giờ này?'))return;"
 "fetch('/alarm_delete?idx='+idx).then(r=>r.json()).then(d=>{"
-"if(d.ok){showAlarmStatus('🗑 Đã xóa');loadAlarms();}else{showAlarmStatus('❌ '+d.error);}"
-"}).catch(()=>showAlarmStatus('❌ Lỗi'));}"
+"if(d.ok){showAlarmStatus('&#x1F5D1; Đã xóa');loadAlarms();}else{showAlarmStatus('&#x274C; '+d.error);}"
+"}).catch(()=>showAlarmStatus('&#x274C; Lỗi'));}"
 "function showAlarmStatus(msg){const s=document.getElementById('alarmStatus');s.textContent=msg;setTimeout(()=>s.textContent='',3000);}"
 "</script>"
 "</body></html>";
@@ -2040,7 +2048,7 @@ static esp_err_t record_handler(httpd_req_t *req) {
     if (strcmp(action, "start") == 0) {
         start_recording(slot);
         char resp[64];
-        snprintf(resp, sizeof(resp), "Recording slot %d started (max 20 actions)", slot + 1);
+        snprintf(resp, sizeof(resp), "Recording slot %d started (max 100 actions)", slot + 1);
         httpd_resp_sendstr(req, resp);
     } else if (strcmp(action, "stop") == 0) {
         recording_state_t* rec = get_recording_state();
@@ -2305,6 +2313,170 @@ static esp_err_t action_json_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     
+    return ESP_OK;
+}
+
+// ==================== MUSIC SEARCH ====================
+// Helper: case-insensitive substring search
+static int stristr_exists(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return 0;
+    
+    size_t hay_len = strlen(haystack);
+    size_t needle_len = strlen(needle);
+    
+    if (needle_len > hay_len) return 0;
+    
+    for (size_t i = 0; i <= hay_len - needle_len; i++) {
+        int match = 1;
+        for (size_t j = 0; j < needle_len; j++) {
+            char h = haystack[i + j];
+            char n = needle[j];
+            // Convert to lowercase for comparison
+            if (h >= 'A' && h <= 'Z') h += 32;
+            if (n >= 'A' && n <= 'Z') n += 32;
+            if (h != n) {
+                match = 0;
+                break;
+            }
+        }
+        if (match) return 1;
+    }
+    return 0;
+}
+
+// Search music files in SD card by keyword (case-insensitive)
+// Returns concatenated list of matching files separated by '\n'
+// max_results: maximum number of results to return
+// result_buffer: output buffer for results
+// buffer_size: size of result_buffer
+// Returns: number of files found
+int search_music_files_in_sdcard(const char* keyword, char* result_buffer, size_t buffer_size, int max_results) {
+    if (!keyword || !result_buffer || buffer_size == 0) return 0;
+    
+    result_buffer[0] = '\0';
+    
+    if (!SdPlayer_IsSdMounted()) {
+        ESP_LOGW(TAG, "SD card not mounted");
+        return 0;
+    }
+    
+    // Allocate file entries
+    int max_files = 100;
+    sd_file_entry_t *entries = (sd_file_entry_t*)malloc(max_files * sizeof(sd_file_entry_t));
+    if (!entries) {
+        ESP_LOGE(TAG, "Failed to allocate memory for file search");
+        return 0;
+    }
+    
+    // List files from /sdcard root
+    int total_files = SdPlayer_ListDir("/sdcard", entries, max_files);
+    int found_count = 0;
+    size_t buffer_used = 0;
+    
+    ESP_LOGI(TAG, "Searching for '%s' in %d files...", keyword, total_files);
+    
+    for (int i = 0; i < total_files && found_count < max_results; i++) {
+        // Skip directories
+        if (entries[i].is_dir) continue;
+        
+        // Check if filename contains keyword (case-insensitive)
+        if (stristr_exists(entries[i].name, keyword)) {
+            // Add to result buffer
+            size_t path_len = strlen(entries[i].path);
+            if (buffer_used + path_len + 2 < buffer_size) {  // +2 for '\n' and '\0'
+                if (found_count > 0) {
+                    result_buffer[buffer_used++] = '\n';
+                }
+                strcpy(result_buffer + buffer_used, entries[i].path);
+                buffer_used += path_len;
+                found_count++;
+                ESP_LOGI(TAG, "  Found: %s", entries[i].path);
+            } else {
+                ESP_LOGW(TAG, "Result buffer full, stopping search");
+                break;
+            }
+        }
+    }
+    
+    free(entries);
+    ESP_LOGI(TAG, "Search completed: %d files match '%s'", found_count, keyword);
+    return found_count;
+}
+
+// ==================== PLAY DEAD (Giả Chết) ====================
+static void play_dead_task(void *pvParameter) {
+    ESP_LOGI(TAG, "[PLAYDEAD] Play Dead sequence started");
+    
+    control_state_t *state = get_control_state();
+    
+    // Step 1: Show SHOCKED emoji (force it, block LLM from changing)
+    set_robot_emoji("shocked");
+    ESP_LOGI(TAG, "[PLAYDEAD] Step 1: Shocked emoji");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    
+    // Step 2: Walk backward 2 steps (~2 seconds)
+    ESP_LOGI(TAG, "[PLAYDEAD] Step 2: Walking backward");
+    set_manual_mode(false);
+    ninja_set_walk();
+    state->j_y = -80;
+    state->j_x = 0;
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    state->j_y = 0;
+    state->j_x = 0;
+    vTaskDelay(pdMS_TO_TICKS(300));
+    
+    // Step 3: Tilt left (LL=100, RL=175), spin LF 360° in one direction (2000ms), wait 1500ms
+    ESP_LOGI(TAG, "[PLAYDEAD] Step 3: Tilt left + spin LF 360°");
+    set_manual_mode(true);
+    servo_attach(SERVO_CH_LEFT_LEG);
+    servo_attach(SERVO_CH_RIGHT_LEG);
+    servo_attach(SERVO_CH_LEFT_FOOT);
+    // Tilt left position
+    calibration_t *cal = get_calibration();
+    servo_write(SERVO_CH_LEFT_LEG, 100);          // LL = 100
+    servo_write(SERVO_CH_RIGHT_LEG, 175);         // RL = 175
+    vTaskDelay(pdMS_TO_TICKS(300));
+    
+    // Spin LF 360° in one direction (2000ms) - sweep from start to end, DO NOT return
+    int lf_center = cal->lf_neutral;
+    int rotation_steps = 20; // 20 steps for smooth rotation
+    int step_delay = 2000 / rotation_steps; // 100ms per step
+    for (int i = 0; i <= rotation_steps; i++) {
+        // Sweep from center-90 to center+90 (180° range) in ONE direction
+        int angle = lf_center - 90 + (i * 180 / rotation_steps);
+        servo_write(SERVO_CH_LEFT_FOOT, angle);
+        vTaskDelay(pdMS_TO_TICKS(step_delay));
+    }
+    // DO NOT return to center - stay at final position (center+90)
+    // Wait 1500ms before next action
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    
+    // Step 4: Lie down (tilt left with LL=155°) for 2s
+    ESP_LOGI(TAG, "[PLAYDEAD] Step 4: Lying down (LL=155)");
+    set_manual_mode(true);
+    servo_attach(SERVO_CH_LEFT_LEG);
+    servo_attach(SERVO_CH_RIGHT_LEG);
+    servo_write(SERVO_CH_LEFT_LEG, 155);          // LL = 155 (lying down)
+    servo_write(SERVO_CH_RIGHT_LEG, 175);         // RL = 175 (tilt left)
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    
+    // Return to home and clear manual mode
+    ESP_LOGI(TAG, "[PLAYDEAD] Step 4: Final go home");
+    set_manual_mode(false);
+    go_home();
+    
+    // Restore neutral emoji
+    vTaskDelay(pdMS_TO_TICKS(500));
+    set_robot_emoji("neutral");
+    
+    ESP_LOGI(TAG, "[PLAYDEAD] Play Dead sequence completed");
+    vTaskDelete(NULL);
+}
+
+static esp_err_t playdead_handler(httpd_req_t *req) {
+    ESP_LOGI(TAG, "[PLAYDEAD] Play Dead requested from web UI");
+    xTaskCreate(play_dead_task, "play_dead", 3072, NULL, 5, NULL);
+    httpd_resp_sendstr(req, "Play Dead started");
     return ESP_OK;
 }
 
@@ -2946,6 +3118,48 @@ typedef struct {
 static alarm_fire_t s_pending[MAX_PENDING_ALARMS];
 static int s_pending_count = 0;
 
+// Public function for MCP tools to add alarms
+int alarm_add_from_mcp(const char* type, int hour, int minute, const char* repeat, const char* message, const char* music, const char* music_name) {
+    if (!type || !repeat) return -1;
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return -2;
+    
+    if (xSemaphoreTake(alarm_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return -3;  // Busy
+    }
+    
+    // Find free slot
+    int slot = -1;
+    for (int i = 0; i < MAX_ALARMS; i++) {
+        if (!alarms[i].used) { slot = i; break; }
+    }
+    
+    if (slot < 0) {
+        xSemaphoreGive(alarm_mutex);
+        return -4;  // Full
+    }
+    
+    memset(&alarms[slot], 0, sizeof(alarm_entry_t));
+    alarms[slot].used = true;
+    alarms[slot].enabled = true;
+    alarms[slot].hour = hour;
+    alarms[slot].minute = minute;
+    strncpy(alarms[slot].type, type, sizeof(alarms[slot].type) - 1);
+    strncpy(alarms[slot].repeat, repeat, sizeof(alarms[slot].repeat) - 1);
+    
+    if (strcmp(type, "alarm") == 0 && music) {
+        strncpy(alarms[slot].music, music, sizeof(alarms[slot].music) - 1);
+        if (music_name) strncpy(alarms[slot].music_name, music_name, sizeof(alarms[slot].music_name) - 1);
+    } else if (strcmp(type, "schedule") == 0 && message) {
+        strncpy(alarms[slot].message, message, sizeof(alarms[slot].message) - 1);
+    }
+    
+    alarm_save();
+    xSemaphoreGive(alarm_mutex);
+    
+    ESP_LOGI(TAG, "MCP alarm added [%d]: %s %02d:%02d %s", slot, type, hour, minute, repeat);
+    return slot;  // Success
+}
+
 static void alarm_check_task(void *pvParameter) {
     ESP_LOGI(TAG, "⏰ Alarm check task started (stack: 4096 bytes, pending: static)");
     
@@ -3536,6 +3750,13 @@ static const httpd_uri_t uri_dance = {
     .user_ctx = NULL
 };
 
+static const httpd_uri_t uri_playdead = {
+    .uri = "/playdead",
+    .method = HTTP_GET,
+    .handler = playdead_handler,
+    .user_ctx = NULL
+};
+
 static const httpd_uri_t uri_music_search = {
     .uri = "/music_search",
     .method = HTTP_GET,
@@ -3731,6 +3952,7 @@ httpd_handle_t webserver_start(void) {
         httpd_register_uri_handler(server, &uri_action_json_get);
         httpd_register_uri_handler(server, &uri_action_json_post);
         httpd_register_uri_handler(server, &uri_dance);
+        httpd_register_uri_handler(server, &uri_playdead);
         httpd_register_uri_handler(server, &uri_music_search);
         httpd_register_uri_handler(server, &uri_music_stop);
         httpd_register_uri_handler(server, &uri_music_status);

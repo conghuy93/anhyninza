@@ -1650,17 +1650,44 @@ bool ninja_play_music(const char* song_name) {
         return false;
     }
     
-    // Try /sdcard/song_name.mp3 and /sdcard/song_name
-    char path[128];
-    snprintf(path, sizeof(path), "/sdcard/%s.mp3", song_name);
+    char path[256];
     
-    ESP_LOGI(TAG, "Attempting to play: %s", path);
-    if (Mp3Player_Play((Mp3Player_t*)g_mp3_player, path)) {
-        g_music_playing = true;
-        return true;
+    // If already a full path (starts with /sdcard/), use directly
+    if (strncmp(song_name, "/sdcard/", 8) == 0) {
+        // Full path provided - try as-is first
+        ESP_LOGI(TAG, "Attempting to play (full path): %s", song_name);
+        if (Mp3Player_Play((Mp3Player_t*)g_mp3_player, song_name)) {
+            g_music_playing = true;
+            return true;
+        }
+        // If path doesn't end with .mp3, try adding it
+        size_t len = strlen(song_name);
+        if (len < 4 || strcasecmp(song_name + len - 4, ".mp3") != 0) {
+            snprintf(path, sizeof(path), "%s.mp3", song_name);
+            ESP_LOGI(TAG, "Attempting to play: %s", path);
+            if (Mp3Player_Play((Mp3Player_t*)g_mp3_player, path)) {
+                g_music_playing = true;
+                return true;
+            }
+        }
+        ESP_LOGW(TAG, "Failed to play: %s", song_name);
+        return false;
     }
     
-    // Try without extension
+    // Short name - try /sdcard/song_name.mp3 first
+    size_t len = strlen(song_name);
+    bool has_mp3 = (len >= 4 && strcasecmp(song_name + len - 4, ".mp3") == 0);
+    
+    if (!has_mp3) {
+        snprintf(path, sizeof(path), "/sdcard/%s.mp3", song_name);
+        ESP_LOGI(TAG, "Attempting to play: %s", path);
+        if (Mp3Player_Play((Mp3Player_t*)g_mp3_player, path)) {
+            g_music_playing = true;
+            return true;
+        }
+    }
+    
+    // Try /sdcard/song_name (as-is)
     snprintf(path, sizeof(path), "/sdcard/%s", song_name);
     ESP_LOGI(TAG, "Attempting to play: %s", path);
     if (Mp3Player_Play((Mp3Player_t*)g_mp3_player, path)) {

@@ -1736,6 +1736,20 @@ void add_chat_message(const char* role, const char* content) {
     }
 }
 
+void set_robot_emoji(const char* emotion) {
+    if (!emotion || strlen(emotion) == 0) return;
+    auto& board = Board::GetInstance();
+    auto display = board.GetDisplay();
+    if (display) {
+        auto& app = Application::GetInstance();
+        std::string emo(emotion);
+        app.Schedule([display, emo]() {
+            display->SetEmotion(emo.c_str());
+            ESP_LOGI(TAG, "Emoji set: %s", emo.c_str());
+        });
+    }
+}
+
 void send_text_to_ai(const char* text) {
     if (!text || strlen(text) == 0) {
         ESP_LOGW(TAG, "send_text_to_ai: empty text");

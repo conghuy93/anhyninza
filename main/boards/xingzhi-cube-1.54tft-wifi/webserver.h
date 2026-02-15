@@ -32,6 +32,16 @@ const char* get_chat_history_json(void);
 const char* get_last_ai_response(void);
 void add_chat_message(const char* role, const char* content);
 
+// Alarm functions (for MCP tool access)
+int alarm_add_from_mcp(const char* type, int hour, int minute, const char* repeat, const char* message, const char* music, const char* music_name);
+
+// Music search in SD card (for MCP tool access)
+// Returns number of files found, result_buffer contains '\n' separated paths
+int search_music_files_in_sdcard(const char* keyword, char* result_buffer, size_t buffer_size, int max_results);
+
+// Emoji/display bridge (implemented in board .cc, called from webserver.c)
+void set_robot_emoji(const char* emotion);
+
 #ifdef __cplusplus
 }
 #endif
