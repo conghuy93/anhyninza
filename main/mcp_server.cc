@@ -125,6 +125,35 @@ void McpServer::AddCommonTools() {
     // Radio tools
     auto radio = Application::GetInstance().GetRadio();
     if (radio) {
+        AddTool("self.radio.list_stations",
+                "List all available radio stations with detailed information. Use this tool when user asks 'what radio stations are available', 'list radio channels', or wants to search for a specific station.\n"
+                "Return:\n"
+                "  JSON array of all available radio stations with key, name, description, genre, and URL.",
+                PropertyList(),
+                [radio](const PropertyList &properties) -> ReturnValue {
+                    const auto& stations = radio->GetStationMap();
+                    if (stations.empty()) {
+                        return "{\"success\": false, \"message\": \"No radio stations available\"}";
+                    }
+                    
+                    // Build detailed JSON response with all station info
+                    std::string json = "{\"success\": true, \"stations\": [";
+                    bool first = true;
+                    for (const auto& [key, station] : stations) {
+                        if (!first) json += ",";
+                        json += "{";
+                        json += "\"key\":\"" + key + "\",";
+                        json += "\"name\":\"" + station.name + "\",";
+                        json += "\"description\":\"" + station.description + "\",";
+                        json += "\"genre\":\"" + station.genre + "\",";
+                        json += "\"url\":\"" + station.url + "\"";
+                        json += "}";
+                        first = false;
+                    }
+                    json += "]}";
+                    return json;
+                });
+        
         AddTool("self.radio.play_station",
                 "Play a radio station by name. Use this tool when user requests to play radio or listen to a specific station.\n"
                 "VOV mộc/mốc/mốt/mậu/máu/một/mút/mót/mục means VOV1 channel.\n"

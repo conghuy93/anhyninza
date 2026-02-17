@@ -98,12 +98,13 @@ bool Mp3Player::Play(const std::string& filepath) {
     }
     
     // Try to create task with stack in PSRAM first (more memory available)
-    // Stack size: 24KB for MP3 decoding + resampling (44100->24000 Hz stereo needs extra buffers)
+    // Stack size: 32KB for MP3 decoding + resampling (44100->24000 Hz stereo needs extra buffers)
     // Note: minimp3 decoder uses ~10KB, resampler needs ~6KB more for stereo conversion
+    // Increased to 32KB to prevent stack overflow with complex MP3 files
     
     // IMPORTANT: TCB (StaticTask_t) MUST be in internal RAM, only stack can be in PSRAM
     // FreeRTOS assertion fails if TCB is in PSRAM: xPortCheckValidTCBMem(pxTaskBuffer)
-    static const size_t PLAYER_STACK_SIZE = 24 * 1024;  // 24KB for stereo + resampling
+    static const size_t PLAYER_STACK_SIZE = 32 * 1024;  // 32KB for stereo + resampling
     StaticTask_t* task_buffer = (StaticTask_t*)heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     StackType_t* stack_buffer = (StackType_t*)heap_caps_malloc(PLAYER_STACK_SIZE, MALLOC_CAP_SPIRAM);
     
@@ -154,6 +155,7 @@ void Mp3Player::Resume() {
 
 void Mp3Player::Stop() {
     bool task_was_running = (player_task_ != nullptr);
+    bool force_killed = false;
     
     if (player_task_) {
         stop_requested_ = true;
@@ -169,16 +171,18 @@ void Mp3Player::Stop() {
             ESP_LOGW(TAG, "Force stopping player task (timed out)");
             vTaskDelete(player_task_);
             player_task_ = nullptr;
+            force_killed = true;
             // Clean up resources that the killed task left behind
             CleanupDecodeResources();
         }
     }
     
-    // Free PSRAM task stack buffers if allocated
-    // IMPORTANT: Only free if we actually stopped a running task
-    // If task self-terminated (player_task_ was nullptr), the task might still
-    // be on its stack executing vTaskDelete() - freeing would cause crash!
-    if (task_was_running) {
+    // Free PSRAM task stack buffers ONLY if we force-killed the task
+    // If task self-terminated, wait for FreeRTOS IDLE task to cleanup first
+    if (force_killed && task_was_running) {
+        // Give IDLE task time to cleanup before freeing buffers
+        vTaskDelay(pdMS_TO_TICKS(100));
+        
         if (psram_task_buffer_) {
             heap_caps_free(psram_task_buffer_);
             psram_task_buffer_ = nullptr;
@@ -189,7 +193,8 @@ void Mp3Player::Stop() {
         }
     }
     
-    // Also free any old PSRAM buffers from previous self-terminated tasks
+    // Free old PSRAM buffers from previous self-terminated tasks
+    // These are safe to free because enough time has passed
     if (old_psram_task_buffer_) {
         heap_caps_free(old_psram_task_buffer_);
         old_psram_task_buffer_ = nullptr;

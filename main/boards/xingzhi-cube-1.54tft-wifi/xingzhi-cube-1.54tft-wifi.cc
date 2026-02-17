@@ -1096,10 +1096,7 @@ private:
                 mp3_player_->Next();
                 return;
             }
-            // In radio mode - double click to next station
-            if (radio_mode_) {
-                RadioNextStation();
-            }
+            // Radio mode: double click disabled (use long press to select station)
         });
 
         volume_up_button_.OnLongPress([this]() {
@@ -1153,10 +1150,7 @@ private:
                 mp3_player_->Previous();
                 return;
             }
-            // In radio mode - double click to previous station
-            if (radio_mode_) {
-                RadioPrevStation();
-            }
+            // Radio mode: double click disabled (use long press to select station)
         });
 
         volume_down_button_.OnLongPress([this]() {
@@ -1303,50 +1297,6 @@ private:
         radio_station_index_ = 0;
         Radio_Stop();
         GetDisplay()->ShowNotification("FM OFF");
-    }
-
-    void RadioNextStation() {
-        if (!radio_mode_) return;
-        const char* json = Radio_GetStationListJson();
-        if (!json || strlen(json) < 3) return;
-        
-        // Parse station list
-        std::vector<std::string> stations;
-        std::string json_str(json);
-        size_t pos = 0;
-        while ((pos = json_str.find('"', pos)) != std::string::npos) {
-            size_t end = json_str.find('"', pos + 1);
-            if (end == std::string::npos) break;
-            stations.push_back(json_str.substr(pos + 1, end - pos - 1));
-            pos = end + 1;
-        }
-        
-        if (stations.empty()) return;
-        radio_station_index_ = (radio_station_index_ + 1) % (int)stations.size();
-        Radio_PlayStation(stations[radio_station_index_].c_str());
-        GetDisplay()->ShowNotification("FM: " + stations[radio_station_index_]);
-    }
-
-    void RadioPrevStation() {
-        if (!radio_mode_) return;
-        const char* json = Radio_GetStationListJson();
-        if (!json || strlen(json) < 3) return;
-        
-        std::vector<std::string> stations;
-        std::string json_str(json);
-        size_t pos = 0;
-        while ((pos = json_str.find('"', pos)) != std::string::npos) {
-            size_t end = json_str.find('"', pos + 1);
-            if (end == std::string::npos) break;
-            stations.push_back(json_str.substr(pos + 1, end - pos - 1));
-            pos = end + 1;
-        }
-        
-        if (stations.empty()) return;
-        radio_station_index_--;
-        if (radio_station_index_ < 0) radio_station_index_ = (int)stations.size() - 1;
-        Radio_PlayStation(stations[radio_station_index_].c_str());
-        GetDisplay()->ShowNotification("FM: " + stations[radio_station_index_]);
     }
 
     // ===== Radio Station Selection UI =====

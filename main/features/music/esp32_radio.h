@@ -110,6 +110,9 @@ public:
     // Get the list of stations
     virtual std::vector<std::string> GetStationList() const override;
     
+    // Get station map with detailed information (for MCP/API)
+    const std::map<std::string, RadioStation>& GetStationMap() const { return radio_stations_; }
+    
     // Get current playback status
     virtual bool IsPlaying() const override { return is_playing_; }
     virtual std::string GetCurrentStation() const override { return current_station_name_; }

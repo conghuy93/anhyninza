@@ -393,9 +393,9 @@ void Esp32Radio::DownloadRadioStream(const std::string& radio_url) {
 
         {
             std::unique_lock<std::mutex> lock(buffer_mutex_);
-            buffer_cv_.wait(lock, [this] { return buffer_size_ < MAX_BUFFER_SIZE || !is_downloading_; });
+            buffer_cv_.wait(lock, [this] { return buffer_size_ < MAX_BUFFER_SIZE || !is_downloading_ || !is_playing_; });
 
-            if (is_downloading_) {
+            if (is_downloading_ && is_playing_) {
                 audio_buffer_.push(RadioAudioChunk(chunk_data, bytes_read));
                 buffer_size_ += bytes_read;
                 total_downloaded += bytes_read;
@@ -462,8 +462,15 @@ void Esp32Radio::PlayRadioStream() {
     {
         std::unique_lock<std::mutex> lock(buffer_mutex_);
         buffer_cv_.wait(lock, [this] { 
-            return buffer_size_ >= MIN_BUFFER_SIZE || (!is_downloading_ && !audio_buffer_.empty()); 
+            return buffer_size_ >= MIN_BUFFER_SIZE || (!is_downloading_ && !audio_buffer_.empty()) || !is_playing_; 
         });
+    }
+    
+    // Check if we should exit early (Stop() was called during startup)
+    if (!is_playing_) {
+        ESP_LOGW(TAG, "Radio playback aborted during startup");
+        CleanupAacDecoder();
+        return;
     }
     
     ESP_LOGI(TAG, "Starting radio playback with buffer size: %d", buffer_size_);
@@ -484,6 +491,7 @@ void Esp32Radio::PlayRadioStream() {
     if (!input_buffer) {
         ESP_LOGE(TAG, "Failed to allocate input buffer");
         is_playing_ = false;
+        CleanupAacDecoder();
         return;
     }
 
@@ -530,8 +538,8 @@ void Esp32Radio::PlayRadioStream() {
                         break;
                     }
                     // Wait for new data
-                    buffer_cv_.wait(lock, [this] { return !audio_buffer_.empty() || !is_downloading_; });
-                    if (audio_buffer_.empty()) {
+                    buffer_cv_.wait(lock, [this] { return !audio_buffer_.empty() || !is_downloading_ || !is_playing_; });
+                    if (audio_buffer_.empty() || !is_playing_) {
                         continue;
                     }
                 }
