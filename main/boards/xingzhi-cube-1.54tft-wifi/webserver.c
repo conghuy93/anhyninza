@@ -21,6 +21,31 @@
 #include "nvs.h"
 #include "stream_player_c.h"
 #include "mp3_player_c.h"
+#include "radio_player_c.h"
+#include "lvgl.h"
+#include "esp_lvgl_port.h"
+#include "esp_netif.h"
+#include "esp_timer.h"
+
+// Forward declarations for qrcodegen (from espressif2022__esp_emote_gfx component)
+enum qrcodegen_Ecc {
+    qrcodegen_Ecc_LOW = 0,
+    qrcodegen_Ecc_MEDIUM,
+    qrcodegen_Ecc_QUARTILE,
+    qrcodegen_Ecc_HIGH,
+};
+
+enum qrcodegen_Mask {
+    qrcodegen_Mask_AUTO = -1,
+};
+
+#define qrcodegen_BUFFER_LEN_FOR_VERSION(n)  ((((n) * 4 + 17) * ((n) * 4 + 17) + 7) / 8 + 1)
+
+extern bool qrcodegen_encodeText(const char *text, uint8_t tempBuffer[], uint8_t qrcode[],
+                                 enum qrcodegen_Ecc ecl, int minVersion, int maxVersion, 
+                                 enum qrcodegen_Mask mask, bool boostEcl);
+extern int qrcodegen_getSize(const uint8_t qrcode[]);
+extern bool qrcodegen_getModule(const uint8_t qrcode[], int x, int y);
 
 static const char *TAG = "webserver";
 
@@ -207,6 +232,127 @@ static void web_action_task(void *pvParameters) {
 static uint32_t last_setting_change = 0;
 static bool settings_changed = false;
 #define SAVE_DELAY_MS 1000
+
+// ==================== CUSTOM KEYWORDS ====================
+#define MAX_CUSTOM_KEYWORDS 10
+#define MAX_KEYWORD_LEN 64
+#define MAX_EMOJI_LEN 16
+
+typedef struct {
+    char keyword[MAX_KEYWORD_LEN];  // Vietnamese keyword (UTF-8)
+    char emoji[MAX_EMOJI_LEN];      // Emoji name: happy, sad, angry, shocked, neutral, love, sleeping
+    int action_id;                  // Action ID (0-255), -1 = no action
+    bool enabled;                   // Is this slot active?
+} custom_keyword_t;
+
+static custom_keyword_t s_custom_keywords[MAX_CUSTOM_KEYWORDS] = {0};
+static SemaphoreHandle_t s_kw_mutex = NULL;
+
+// Load custom keywords from NVS
+static void load_custom_keywords(void) {
+    nvs_handle_t handle;
+    if (nvs_open("custom_kw", NVS_READONLY, &handle) != ESP_OK) {
+        ESP_LOGW(TAG, "[CUSTOM_KW] No custom keywords in NVS");
+        return;
+    }
+    
+    for (int i = 0; i < MAX_CUSTOM_KEYWORDS; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "kw%d", i);
+        
+        size_t len = 0;
+        if (nvs_get_str(handle, key, NULL, &len) == ESP_OK && len > 0) {
+            char *json_str = malloc(len);
+            if (json_str && nvs_get_str(handle, key, json_str, &len) == ESP_OK) {
+                // Parse JSON: {"keyword":"text","emoji":"happy","action":1}
+                cJSON *root = cJSON_Parse(json_str);
+                if (root) {
+                    cJSON *kw = cJSON_GetObjectItem(root, "keyword");
+                    cJSON *em = cJSON_GetObjectItem(root, "emoji");
+                    cJSON *act = cJSON_GetObjectItem(root, "action");
+                    
+                    if (kw && kw->valuestring && em && em->valuestring && act) {
+                        strncpy(s_custom_keywords[i].keyword, kw->valuestring, MAX_KEYWORD_LEN - 1);
+                        strncpy(s_custom_keywords[i].emoji, em->valuestring, MAX_EMOJI_LEN - 1);
+                        s_custom_keywords[i].action_id = act->valueint;
+                        s_custom_keywords[i].enabled = true;
+                        ESP_LOGI(TAG, "[CUSTOM_KW] Loaded slot %d: '%s' -> emoji=%s, action=%d",
+                                 i, s_custom_keywords[i].keyword, s_custom_keywords[i].emoji, s_custom_keywords[i].action_id);
+                    }
+                    cJSON_Delete(root);
+                }
+                free(json_str);
+            }
+        }
+    }
+    
+    nvs_close(handle);
+}
+
+// Save custom keyword to NVS
+static esp_err_t save_custom_keyword(int slot, const char* keyword, const char* emoji, int action_id) {
+    if (slot < 0 || slot >= MAX_CUSTOM_KEYWORDS) return ESP_ERR_INVALID_ARG;
+    
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("custom_kw", NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    
+    char key[16];
+    snprintf(key, sizeof(key), "kw%d", slot);
+    
+    // Build JSON string
+    char json_str[256];
+    snprintf(json_str, sizeof(json_str), "{\"keyword\":\"%s\",\"emoji\":\"%s\",\"action\":%d}",
+             keyword, emoji, action_id);
+    
+    err = nvs_set_str(handle, key, json_str);
+    if (err == ESP_OK) {
+        nvs_commit(handle);
+        
+        // Update in-memory copy
+        if (xSemaphoreTake(s_kw_mutex, pdMS_TO_TICKS(100))) {
+            strncpy(s_custom_keywords[slot].keyword, keyword, MAX_KEYWORD_LEN - 1);
+            strncpy(s_custom_keywords[slot].emoji, emoji, MAX_EMOJI_LEN - 1);
+            s_custom_keywords[slot].action_id = action_id;
+            s_custom_keywords[slot].enabled = true;
+            xSemaphoreGive(s_kw_mutex);
+        }
+        
+        ESP_LOGI(TAG, "[CUSTOM_KW] Saved slot %d: '%s' -> emoji=%s, action=%d",
+                 slot, keyword, emoji, action_id);
+    }
+    
+    nvs_close(handle);
+    return err;
+}
+
+// Delete custom keyword from NVS
+static esp_err_t delete_custom_keyword(int slot) {
+    if (slot < 0 || slot >= MAX_CUSTOM_KEYWORDS) return ESP_ERR_INVALID_ARG;
+    
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("custom_kw", NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    
+    char key[16];
+    snprintf(key, sizeof(key), "kw%d", slot);
+    
+    err = nvs_erase_key(handle, key);
+    if (err == ESP_OK) {
+        nvs_commit(handle);
+        
+        // Clear in-memory copy
+        if (xSemaphoreTake(s_kw_mutex, pdMS_TO_TICKS(100))) {
+            memset(&s_custom_keywords[slot], 0, sizeof(custom_keyword_t));
+            xSemaphoreGive(s_kw_mutex);
+        }
+        
+        ESP_LOGI(TAG, "[CUSTOM_KW] Deleted slot %d", slot);
+    }
+    
+    nvs_close(handle);
+    return err;
+}
 
 // HTML Web UI (embedded)
 static const char html_content[] = 
@@ -515,6 +661,23 @@ static const char html_content[] =
 "</div>"
 "</div>"
 "</div>"
+"<div class=\"calibration\" style=\"max-width:420px;margin:8px auto;background:#1a2530;border:2px solid #2ecc71;padding:12px\">"
+"<h2 style=\"color:#2ecc71;font-size:1em;margin-bottom:10px\">&#x1F4FB; VOV Radio</h2>"
+"<div style=\"background:#2c3e50;border-radius:8px;padding:10px;margin-bottom:10px\">"
+"<label style=\"color:#7f8c8d;font-size:0.75em;display:block;margin-bottom:6px\">&#x1F3A7; Chọn kênh radio:</label>"
+"<select id=\"radioStationSelect\" style=\"width:100%;padding:10px;border:2px solid #2ecc71;border-radius:8px;background:#1a252f;color:#ecf0f1;font-size:0.9em;\">"
+"<option value=\"\">-- Chọn kênh VOV --</option>"
+"</select>"
+"</div>"
+"<div style=\"display:flex;gap:6px;margin-bottom:10px\">"
+"<button class=\"btn\" style=\"background:#2ecc71;flex:1;font-size:0.9em;padding:12px\" id=\"btnRadioPlay\">▶ Phát Radio</button>"
+"<button class=\"btn\" style=\"background:#e74c3c;flex:1;font-size:0.9em;padding:12px\" id=\"btnRadioStop\">⏹ Dừng</button>"
+"</div>"
+"<div id=\"radioStatus\" style=\"background:#1a252f;border:1px solid #2ecc71;border-radius:8px;padding:10px;min-height:50px\">"
+"<div id=\"radioPlaying\" style=\"color:#2ecc71;font-size:0.9em;font-weight:bold\">Radio chưa phát</div>"
+"<div id=\"radioStation\" style=\"color:#bdc3c7;font-size:0.8em;margin-top:4px\"></div>"
+"</div>"
+"</div>"
 "</div>"
 "<div id=\"tab4\" class=\"tab-content\">"
 "<div class=\"calibration\" style=\"max-width:420px;margin:8px auto;background:#1a2530;border:2px solid #ff9800;padding:12px\">"
@@ -815,6 +978,58 @@ static const char html_content[] =
 "<label class=\"switch\"><input type=\"checkbox\" id=\"musicPowerSave\"><span class=\"slider round\"></span></label>"
 "</div>"
 "<div style=\"color:#7f8c8d;font-size:0.7em;margin-top:4px\">Bật để tắt LED và giảm sáng màn hình khi đang phát nhạc, tiết kiệm pin đáng kể.</div>"
+"</div>"
+"<div class=\"calibration\" style=\"margin-top:10px;background:#1a2530;border:2px solid #f39c12;padding:10px\">"
+"<h2 style=\"color:#f39c12;font-size:0.95em;margin-bottom:8px\">🎯 Từ Khóa Tùy Chỉnh (Custom Keywords)</h2>"
+"<div style=\"background:#2c3e50;padding:10px;border-radius:8px;margin-bottom:10px\">"
+"<div style=\"color:#7f8c8d;font-size:0.75em;margin-bottom:8px\">⚡ Tạo từ khóa riêng: Khi bạn nói từ khóa → Robot sẽ hiển thị emoji và thực hiện hành động.</div>"
+"<div style=\"display:grid;gap:8px;margin-bottom:8px\">"
+"<div>"
+"<label style=\"color:#3498db;font-size:0.75em;display:block;margin-bottom:3px\">💬 Từ khóa (VD: \"xin chào\", \"vẫy tay\")</label>"
+"<input type=\"text\" id=\"kwInput\" placeholder=\"Nhập từ khóa tiếng Việt...\" style=\"width:100%;padding:8px;border:2px solid #3498db;border-radius:6px;background:#1a252f;color:#ecf0f1;font-size:0.85em;box-sizing:border-box\">"
+"</div>"
+"<div style=\"display:grid;grid-template-columns:1fr 1fr;gap:8px\">"
+"<div>"
+"<label style=\"color:#e67e22;font-size:0.75em;display:block;margin-bottom:3px\">😊 Emoji</label>"
+"<select id=\"kwEmoji\" style=\"width:100%;padding:8px;border:2px solid #e67e22;border-radius:6px;background:#1a252f;color:#ecf0f1;font-size:0.85em\">"
+"<option value=\"happy\">😊 Happy</option>"
+"<option value=\"sad\">😢 Sad</option>"
+"<option value=\"angry\">😠 Angry</option>"
+"<option value=\"shocked\">😲 Shocked</option>"
+"<option value=\"love\">😍 Love</option>"
+"<option value=\"neutral\">😐 Neutral</option>"
+"<option value=\"sleeping\">😴 Sleeping</option>"
+"</select>"
+"</div>"
+"<div>"
+"<label style=\"color:#9b59b6;font-size:0.75em;display:block;margin-bottom:3px\">🎬 Hành động</label>"
+"<select id=\"kwAction\" style=\"width:100%;padding:8px;border:2px solid #9b59b6;border-radius:6px;background:#1a252f;color:#ecf0f1;font-size:0.85em\">"
+"<option value=\"-1\">Không (chỉ emoji)</option>"
+"<option value=\"0\">🏠 Go Home</option>"
+"<option value=\"1\">⬆️ Tiến 1 bước</option>"
+"<option value=\"2\">⬇️ Lùi 1 bước</option>"
+"<option value=\"3\">↺ Quay trái</option>"
+"<option value=\"4\">↻ Quay phải</option>"
+"<option value=\"5\">⬅️ Nghiêng trái</option>"
+"<option value=\"6\">➡️ Nghiêng phải</option>"
+"<option value=\"7\">🎭 Giả chết</option>"
+"<option value=\"8\">👈 Vẫy tay trái</option>"
+"<option value=\"9\">👉 Vẫy tay phải</option>"
+"<option value=\"10\">🦵 Vẫy chân phải</option>"
+"<option value=\"11\">🦵 Vẫy chân trái</option>"
+"<option value=\"12\">🎵 Nhảy combo 1</option>"
+"<option value=\"13\">🎵 Nhảy combo 2</option>"
+"</select>"
+"</div>"
+"</div>"
+"</div>"
+"<button class=\"btn-apply\" onclick=\"addCustomKeyword()\" style=\"background:#27ae60;width:100%;padding:10px;font-size:0.85em\">➕ Thêm Từ Khóa</button>"
+"</div>"
+"<div>"
+"<div style=\"color:#3498db;font-size:0.8em;font-weight:bold;margin-bottom:6px\">📋 Danh sách từ khóa đã lưu:</div>"
+"<div id=\"kwList\" style=\"min-height:60px;max-height:200px;overflow-y:auto;background:#1a252f;padding:8px;border-radius:6px\"></div>"
+"</div>"
+"<div id=\"kwStatus\" style=\"color:#2ecc71;font-size:0.75em;margin-top:6px;text-align:center\"></div>"
 "</div>"
 "<div style=\"display:flex;gap:6px;\">"
 "<button class=\"btn-apply\" id=\"btnApply\" style=\"flex:1;\">✅ Apply</button>"
@@ -1323,6 +1538,86 @@ static const char html_content[] =
 "if(d.ok){showAlarmStatus('&#x1F5D1; Đã xóa');loadAlarms();}else{showAlarmStatus('&#x274C; '+d.error);}"
 "}).catch(()=>showAlarmStatus('&#x274C; Lỗi'));}"
 "function showAlarmStatus(msg){const s=document.getElementById('alarmStatus');s.textContent=msg;setTimeout(()=>s.textContent='',3000);}"
+"function loadCustomKeywords(){"
+"fetch('/custom_keywords').then(r=>r.json()).then(d=>{"
+"const list=document.getElementById('kwList');"
+"if(!d.keywords||!d.keywords.length){list.innerHTML='<div style=\"color:#7f8c8d;text-align:center;padding:8px\">Chưa có từ khóa nào</div>';return;}"
+"let h='';"
+"d.keywords.forEach((kw)=>{"
+"const emojiMap={'happy':'😊','sad':'😢','angry':'😠','shocked':'😲','love':'😍','neutral':'😐','sleeping':'😴'};"
+"const actionNames={'-1':'Không','0':'🏠 Home','1':'⬆️ Tiến','2':'⬇️ Lùi','3':'↺ Trái','4':'↻ Phải','5':'⬅️ Nghiêng trái','6':'➡️ Nghiêng phải','7':'🎭 Giả chết','8':'👈 Vẫy tay L','9':'👉 Vẫy tay R','10':'🦵 Vẫy chân R','11':'🦵 Vẫy chân L','12':'🎵 Combo 1','13':'🎵 Combo 2'};"
+"h+='<div style=\"display:flex;align-items:center;padding:6px;margin-bottom:4px;background:#2c3e50;border-radius:6px;border-left:3px solid #f39c12\">';"
+"h+='<div style=\"flex:1\">';"
+"h+='<div style=\"font-size:0.9em;font-weight:bold;color:#ecf0f1\">💬 \"'+kw.keyword+'\"</div>';"
+"h+='<div style=\"font-size:0.7em;color:#95a5a6;margin-top:2px\">'+( emojiMap[kw.emoji]||'?')+' '+kw.emoji+' | '+(actionNames[kw.action.toString()]||'ID '+kw.action)+'</div>';"
+"h+='</div>';"
+"h+='<span onclick=\"deleteKeyword('+kw.slot+')\" style=\"color:#e74c3c;cursor:pointer;font-size:1.1em;padding:4px\" title=\"Xóa\">🗑</span>';"
+"h+='</div>';"
+"});"
+"list.innerHTML=h;"
+"}).catch(()=>{});}"
+"function addCustomKeyword(){"
+"const kw=document.getElementById('kwInput').value.trim();"
+"if(!kw){alert('Nhập từ khóa!');return;}"
+"const emoji=document.getElementById('kwEmoji').value;"
+"const action=document.getElementById('kwAction').value;"
+"const body=JSON.stringify({keyword:kw,emoji:emoji,action:parseInt(action)});"
+"fetch('/custom_keyword_add',{method:'POST',headers:{'Content-Type':'application/json'},body:body}).then(r=>r.json()).then(d=>{"
+"if(d.ok){showKwStatus('✅ Đã thêm từ khóa \"'+kw+'\"');loadCustomKeywords();document.getElementById('kwInput').value='';}else{showKwStatus('❌ '+d.error);}"
+"}).catch(()=>showKwStatus('❌ Lỗi kết nối'));}"
+"function deleteKeyword(slot){"
+"if(!confirm('Xóa từ khóa này?'))return;"
+"fetch('/custom_keyword_delete?slot='+slot).then(r=>r.json()).then(d=>{"
+"if(d.ok){showKwStatus('🗑️ Đã xóa');loadCustomKeywords();}else{showKwStatus('❌ '+d.error);}"
+"}).catch(()=>showKwStatus('❌ Lỗi'));}"
+"function showKwStatus(msg){const s=document.getElementById('kwStatus');s.textContent=msg;setTimeout(()=>s.textContent='',3000);}"
+"window.addEventListener('load',function(){loadCustomKeywords();});"
+"let radioStations=[];"
+"function loadRadioStations(){"
+"fetch('/radio_stations').then(r=>r.json()).then(data=>{"
+"radioStations=data;"
+"const sel=document.getElementById('radioStationSelect');"
+"sel.innerHTML='<option value=\"\">-- Chọn kênh VOV --</option>';"
+"data.forEach(s=>{"
+"const opt=document.createElement('option');"
+"opt.value=s;"
+"opt.textContent=s;"
+"sel.appendChild(opt);"
+"});"
+"}).catch(e=>console.error('Load radio stations error:',e));"
+"}"
+"function playRadio(){"
+"const sel=document.getElementById('radioStationSelect');"
+"const station=sel.value;"
+"if(!station){alert('Vui lòng chọn kênh radio!');return;}"
+"fetch('/radio_play?station='+encodeURIComponent(station)).then(r=>r.json()).then(d=>{"
+"if(d.status==='ok'){updateRadioStatus();}else{alert('Lỗi: '+(d.message||'Không thể phát'));}}"
+").catch(e=>{alert('Lỗi kết nối');console.error(e);});"
+"}"
+"function stopRadio(){"
+"fetch('/radio_stop').then(r=>r.json()).then(d=>{"
+"if(d.status==='ok'){updateRadioStatus();}else{alert('Lỗi dừng radio');}"
+"}).catch(e=>{alert('Lỗi kết nối');console.error(e);});"
+"}"
+"function updateRadioStatus(){"
+"fetch('/radio_status').then(r=>r.json()).then(d=>{"
+"const playDiv=document.getElementById('radioPlaying');"
+"const stationDiv=document.getElementById('radioStation');"
+"if(d.playing){"
+"playDiv.textContent='▶️ Đang phát radio';"
+"playDiv.style.color='#2ecc71';"
+"stationDiv.textContent='📻 '+d.station;"
+"}else{"
+"playDiv.textContent='⏹️ Radio chưa phát';"
+"playDiv.style.color='#7f8c8d';"
+"stationDiv.textContent='';"
+"}"
+"}).catch(e=>console.error('Radio status error:',e));"
+"}"
+"document.getElementById('btnRadioPlay').addEventListener('click',playRadio);"
+"document.getElementById('btnRadioStop').addEventListener('click',stopRadio);"
+"window.addEventListener('load',function(){loadRadioStations();updateRadioStatus();});"
+"setInterval(updateRadioStatus,5000);"
 "</script>"
 "</body></html>";
 
@@ -2403,7 +2698,169 @@ int search_music_files_in_sdcard(const char* keyword, char* result_buffer, size_
     return found_count;
 }
 
+// ==================== QR CODE DISPLAY ====================
+static lv_obj_t *s_qr_canvas = NULL;    // LVGL canvas for QR
+static void *s_qr_canvas_buf = NULL;     // Canvas buffer
+static esp_timer_handle_t s_qr_timer = NULL;  // Auto-hide timer
+
+static void qr_timer_callback(void *arg) {
+    ESP_LOGI(TAG, "[QR] Auto-hide timer fired");
+    if (lvgl_port_lock(100)) {
+        if (s_qr_canvas) {
+            lv_obj_del(s_qr_canvas);
+            s_qr_canvas = NULL;
+        }
+        if (s_qr_canvas_buf) {
+            free(s_qr_canvas_buf);
+            s_qr_canvas_buf = NULL;
+        }
+        lvgl_port_unlock();
+        ESP_LOGI(TAG, "[QR] QR code hidden");
+    }
+    set_robot_emoji("neutral");
+}
+
+void hide_qr_code(void) {
+    if (s_qr_timer) {
+        esp_timer_stop(s_qr_timer);
+    }
+    if (lvgl_port_lock(200)) {
+        if (s_qr_canvas) {
+            lv_obj_del(s_qr_canvas);
+            s_qr_canvas = NULL;
+        }
+        if (s_qr_canvas_buf) {
+            free(s_qr_canvas_buf);
+            s_qr_canvas_buf = NULL;
+        }
+        lvgl_port_unlock();
+        ESP_LOGI(TAG, "[QR] QR code hidden (manual)");
+    }
+}
+
+void show_qr_code(const char* url, int duration_ms) {
+    if (!url || strlen(url) == 0) {
+        ESP_LOGW(TAG, "[QR] Empty URL");
+        return;
+    }
+    ESP_LOGI(TAG, "[QR] Showing QR for: %s (duration=%dms)", url, duration_ms);
+    
+    hide_qr_code();
+    
+    // Generate QR code using qrcodegen (version 5 = up to 134 chars)
+    uint8_t tempBuffer[qrcodegen_BUFFER_LEN_FOR_VERSION(5)];
+    uint8_t qrcode[qrcodegen_BUFFER_LEN_FOR_VERSION(5)];
+    
+    bool ok = qrcodegen_encodeText(url, tempBuffer, qrcode,
+        qrcodegen_Ecc_LOW, 1, 5, qrcodegen_Mask_AUTO, true);
+    
+    if (!ok) {
+        ESP_LOGE(TAG, "[QR] Failed to generate QR code (URL too long?)");
+        return;
+    }
+    
+    int qr_size = qrcodegen_getSize(qrcode);
+    int scale = 140 / qr_size;  // Target ~140x140px on 240x240 screen
+    if (scale < 2) scale = 2;
+    if (scale > 4) scale = 4;
+    int canvas_size = qr_size * scale;
+    
+    ESP_LOGI(TAG, "[QR] QR size=%dx%d, scale=%d, canvas=%dx%d", qr_size, qr_size, scale, canvas_size, canvas_size);
+    
+    if (!lvgl_port_lock(500)) {
+        ESP_LOGE(TAG, "[QR] Failed to lock LVGL");
+        return;
+    }
+    
+    // Create canvas
+    lv_obj_t *screen = lv_screen_active();
+    s_qr_canvas = lv_canvas_create(screen);
+    if (!s_qr_canvas) {
+        ESP_LOGE(TAG, "[QR] Failed to create canvas");
+        lvgl_port_unlock();
+        return;
+    }
+    
+    // Allocate buffer (RGB565 = 16 bpp, stride = 1 byte alignment)
+    size_t buf_size = LV_CANVAS_BUF_SIZE(canvas_size, canvas_size, 16, 1);
+    s_qr_canvas_buf = malloc(buf_size);
+    if (!s_qr_canvas_buf) {
+        ESP_LOGE(TAG, "[QR] Failed to allocate canvas buffer (%d bytes)", buf_size);
+        lv_obj_del(s_qr_canvas);
+        s_qr_canvas = NULL;
+        lvgl_port_unlock();
+        return;
+    }
+    
+    lv_canvas_set_buffer(s_qr_canvas, s_qr_canvas_buf, canvas_size, canvas_size, LV_COLOR_FORMAT_RGB565);
+    lv_canvas_fill_bg(s_qr_canvas, lv_color_white(), LV_OPA_COVER);
+    
+    // Draw QR modules
+    for (int y = 0; y < qr_size; y++) {
+        for (int x = 0; x < qr_size; x++) {
+            if (qrcodegen_getModule(qrcode, x, y)) {
+                // Black module - draw scaled block
+                for (int py = 0; py < scale; py++) {
+                    for (int px = 0; px < scale; px++) {
+                        lv_canvas_set_px(s_qr_canvas, x * scale + px, y * scale + py, lv_color_black(), LV_OPA_COVER);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Center on screen
+    lv_obj_center(s_qr_canvas);
+    lv_obj_move_foreground(s_qr_canvas);
+    
+    lvgl_port_unlock();
+    
+    set_robot_emoji("winking");
+    
+    // Auto-hide timer
+    if (!s_qr_timer) {
+        const esp_timer_create_args_t timer_args = {
+            .callback = qr_timer_callback,
+            .arg = NULL,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "qr_hide",
+        };
+        esp_timer_create(&timer_args, &s_qr_timer);
+    }
+    esp_timer_start_once(s_qr_timer, (uint64_t)duration_ms * 1000);
+    ESP_LOGI(TAG, "[QR] QR displayed, auto-hide in %dms", duration_ms);
+}
+
+void show_qr_for_page(const char* page) {
+    esp_netif_ip_info_t ip_info;
+    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (!netif || esp_netif_get_ip_info(netif, &ip_info) != ESP_OK || ip_info.ip.addr == 0) {
+        ESP_LOGW(TAG, "[QR] WiFi not connected");
+        return;
+    }
+    
+    char url[128];
+    if (page && strcmp(page, "settings") == 0) {
+        snprintf(url, sizeof(url), "http://" IPSTR "/#cai-dat", IP2STR(&ip_info.ip));
+    } else {
+        snprintf(url, sizeof(url), "http://" IPSTR, IP2STR(&ip_info.ip));
+    }
+    
+    show_qr_code(url, 30000);
+}
+
 // ==================== PLAY DEAD (Giả Chết) ====================
+static volatile int s_emoji_locked = 0;  // Emoji lock flag (atomic-like for single-core access)
+
+void set_emoji_lock(int locked) {
+    s_emoji_locked = locked;
+    ESP_LOGI(TAG, "[KEYWORD] Emoji lock: %s", locked ? "LOCKED" : "UNLOCKED");
+}
+
+int get_emoji_lock(void) {
+    return s_emoji_locked;
+}
+
 static void play_dead_task(void *pvParameter) {
     ESP_LOGI(TAG, "[PLAYDEAD] Play Dead sequence started");
     
@@ -2425,31 +2882,32 @@ static void play_dead_task(void *pvParameter) {
     state->j_x = 0;
     vTaskDelay(pdMS_TO_TICKS(300));
     
-    // Step 3: Tilt left (LL=100, RL=175), spin LF 360° in one direction (2000ms), wait 1500ms
-    ESP_LOGI(TAG, "[PLAYDEAD] Step 3: Tilt left + spin LF 360°");
+    // Step 3: Tilt left, rotate LF to 60° over 2s, then go home
+    ESP_LOGI(TAG, "[PLAYDEAD] Step 3: Tilt left + LF to 60 deg");
     set_manual_mode(true);
     servo_attach(SERVO_CH_LEFT_LEG);
     servo_attach(SERVO_CH_RIGHT_LEG);
     servo_attach(SERVO_CH_LEFT_FOOT);
     // Tilt left position
-    calibration_t *cal = get_calibration();
     servo_write(SERVO_CH_LEFT_LEG, 100);          // LL = 100
     servo_write(SERVO_CH_RIGHT_LEG, 175);         // RL = 175
     vTaskDelay(pdMS_TO_TICKS(300));
     
-    // Spin LF 360° in one direction (2000ms) - sweep from start to end, DO NOT return
-    int lf_center = cal->lf_neutral;
-    int rotation_steps = 20; // 20 steps for smooth rotation
+    // Smoothly rotate LF to 60° over 2s
+    calibration_t *cal = get_calibration();
+    int lf_start = cal->lf_neutral;
+    int lf_target = 60;
+    int rotation_steps = 20;
     int step_delay = 2000 / rotation_steps; // 100ms per step
-    for (int i = 0; i <= rotation_steps; i++) {
-        // Sweep from center-90 to center+90 (180° range) in ONE direction
-        int angle = lf_center - 90 + (i * 180 / rotation_steps);
+    for (int i = 1; i <= rotation_steps; i++) {
+        int angle = lf_start + (lf_target - lf_start) * i / rotation_steps;
         servo_write(SERVO_CH_LEFT_FOOT, angle);
         vTaskDelay(pdMS_TO_TICKS(step_delay));
     }
-    // DO NOT return to center - stay at final position (center+90)
-    // Wait 1500ms before next action
-    vTaskDelay(pdMS_TO_TICKS(1500));
+    // Go home after tilt
+    set_manual_mode(false);
+    go_home();
+    vTaskDelay(pdMS_TO_TICKS(500));
     
     // Step 4: Lie down (tilt left with LL=155°) for 2s
     ESP_LOGI(TAG, "[PLAYDEAD] Step 4: Lying down (LL=155)");
@@ -2465,12 +2923,302 @@ static void play_dead_task(void *pvParameter) {
     set_manual_mode(false);
     go_home();
     
-    // Restore neutral emoji
+    // Restore neutral emoji and unlock
     vTaskDelay(pdMS_TO_TICKS(500));
     set_robot_emoji("neutral");
+    set_emoji_lock(0);  // Unlock emoji when animation finishes
     
     ESP_LOGI(TAG, "[PLAYDEAD] Play Dead sequence completed");
     vTaskDelete(NULL);
+}
+
+void trigger_play_dead(void) {
+    ESP_LOGI(TAG, "[KEYWORD] Triggering play_dead from keyword detection");
+    // Lock emoji immediately
+    set_emoji_lock(1);
+    set_robot_emoji("shocked");
+    xTaskCreate(play_dead_task, "play_dead", 3072, NULL, 5, NULL);
+}
+
+// ==================== ACTION EXECUTOR ====================
+// Forward declaration
+static void execute_action(int action_id);
+
+// Task wrapper for executing custom keyword actions
+static void custom_action_task(void *pvParameters) {
+    int action_id = *((int*)pvParameters);
+    free(pvParameters);
+    execute_action(action_id);
+    vTaskDelete(NULL);
+}
+
+// Execute action by ID
+static void execute_action(int action_id) {
+    control_state_t *state = get_control_state();
+    calibration_t *cal = get_calibration();
+    
+    ESP_LOGI(TAG, "[ACTION] Executing action ID: %d", action_id);
+    
+    switch (action_id) {
+        case 0:  // Go home
+            set_manual_mode(false);
+            go_home();
+            break;
+            
+        case 1:  // Forward 1 step
+            set_manual_mode(false);
+            ninja_set_walk();
+            state->j_y = 80;
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            state->j_y = 0;
+            break;
+            
+        case 2:  // Backward 1 step
+            set_manual_mode(false);
+            ninja_set_walk();
+            state->j_y = -80;
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            state->j_y = 0;
+            break;
+            
+        case 3:  // Turn left
+            set_manual_mode(true);
+            servo_attach(SERVO_CH_LEFT_FOOT);
+            servo_attach(SERVO_CH_RIGHT_FOOT);
+            for (int i = 0; i < cal->turn_left_speed / 10; i++) {
+                servo_write(SERVO_CH_LEFT_FOOT, cal->lf_neutral + 10);
+                servo_write(SERVO_CH_RIGHT_FOOT, cal->rf_neutral - 10);
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            set_manual_mode(false);
+            go_home();
+            break;
+            
+        case 4:  // Turn right
+            set_manual_mode(true);
+            servo_attach(SERVO_CH_LEFT_FOOT);
+            servo_attach(SERVO_CH_RIGHT_FOOT);
+            for (int i = 0; i < cal->turn_left_speed / 10; i++) {
+                servo_write(SERVO_CH_LEFT_FOOT, cal->lf_neutral - 10);
+                servo_write(SERVO_CH_RIGHT_FOOT, cal->rf_neutral + 10);
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            set_manual_mode(false);
+            go_home();
+            break;
+            
+        case 5:  // Tilt left
+            ninja_tilt_left();
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            go_home();
+            break;
+            
+        case 6:  // Tilt right
+            ninja_tilt_right();
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            go_home();
+            break;
+            
+        case 7:  // Play dead
+            trigger_play_dead();
+            break;
+            
+        case 8:  // Wave left arm
+            state->button_a = 1;
+            vTaskDelay(pdMS_TO_TICKS(500));
+            state->button_a = 0;
+            break;
+            
+        case 9:  // Wave right arm
+            state->button_b = 1;
+            vTaskDelay(pdMS_TO_TICKS(500));
+            state->button_b = 0;
+            break;
+            
+        case 10:  // Wave right leg (rhythm right)
+            set_manual_mode(true);
+            servo_attach(SERVO_CH_RIGHT_LEG);
+            for (int i = 0; i < 3; i++) {
+                servo_write(SERVO_CH_RIGHT_LEG, 170);
+                vTaskDelay(pdMS_TO_TICKS(200));
+                servo_write(SERVO_CH_RIGHT_LEG, 150);
+                vTaskDelay(pdMS_TO_TICKS(200));
+                servo_write(SERVO_CH_RIGHT_LEG, 140);
+                vTaskDelay(pdMS_TO_TICKS(200));
+            }
+            set_manual_mode(false);
+            go_home();
+            break;
+            
+        case 11:  // Wave left leg (rhythm left)
+            set_manual_mode(true);
+            servo_attach(SERVO_CH_LEFT_LEG);
+            for (int i = 0; i < 3; i++) {
+                servo_write(SERVO_CH_LEFT_LEG, 10);
+                vTaskDelay(pdMS_TO_TICKS(200));
+                servo_write(SERVO_CH_LEFT_LEG, 30);
+                vTaskDelay(pdMS_TO_TICKS(200));
+                servo_write(SERVO_CH_LEFT_LEG, 75);
+                vTaskDelay(pdMS_TO_TICKS(200));
+            }
+            set_manual_mode(false);
+            go_home();
+            break;
+            
+        case 12:  // Combo 1 (LF)
+            cal->combo_lf_speed = 1000;
+            ninja_combo1();
+            break;
+            
+        case 13:  // Combo 2 (RF)
+            cal->combo_rf_speed = 1000;
+            ninja_combo2();
+            break;
+            
+        default:
+            ESP_LOGW(TAG, "[ACTION] Unknown action ID: %d", action_id);
+            break;
+    }
+}
+
+// ==================== LOCAL KEYWORD DETECTION ====================
+// Helper: case-insensitive substring match for UTF-8 strings
+static int str_contains_ci(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return 0;
+    // For UTF-8 Vietnamese text, we do byte-level matching (both already lowercase)
+    const char* h = haystack;
+    while (*h) {
+        const char* h2 = h;
+        const char* n2 = needle;
+        while (*h2 && *n2 && *h2 == *n2) {
+            h2++;
+            n2++;
+        }
+        if (*n2 == '\0') return 1;  // Found!
+        h++;
+    }
+    return 0;
+}
+
+// Convert ASCII chars to lowercase (UTF-8 Vietnamese chars pass through unchanged)
+static void to_lower_ascii(char* dst, const char* src, size_t max_len) {
+    size_t i = 0;
+    while (src[i] && i < max_len - 1) {
+        if (src[i] >= 'A' && src[i] <= 'Z') {
+            dst[i] = src[i] + 32;
+        } else {
+            dst[i] = src[i];
+        }
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+int check_stt_keywords(const char* text) {
+    if (!text || strlen(text) == 0) return 0;
+    
+    // Convert to lowercase (ASCII only, UTF-8 Vietnamese preserved)
+    char lower[256];
+    to_lower_ascii(lower, text, sizeof(lower));
+    
+    ESP_LOGI(TAG, "[KEYWORD] Checking STT text: '%s'", lower);
+    
+    // === CHECK CUSTOM KEYWORDS FIRST (highest priority) ===
+    if (xSemaphoreTake(s_kw_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        for (int i = 0; i < MAX_CUSTOM_KEYWORDS; i++) {
+            if (!s_custom_keywords[i].enabled) continue;
+            
+            // Convert custom keyword to lowercase for comparison
+            char kw_lower[MAX_KEYWORD_LEN];
+            to_lower_ascii(kw_lower, s_custom_keywords[i].keyword, sizeof(kw_lower));
+            
+            if (str_contains_ci(lower, kw_lower)) {
+                ESP_LOGI(TAG, "[CUSTOM_KW] MATCH slot %d: '%s' -> emoji=%s, action=%d",
+                         i, s_custom_keywords[i].keyword, s_custom_keywords[i].emoji, s_custom_keywords[i].action_id);
+                
+                // Set emoji (lock it if action is play_dead or long action)
+                if (s_custom_keywords[i].action_id == 7) {  // play_dead locks emoji
+                    set_emoji_lock(1);
+                }
+                set_robot_emoji(s_custom_keywords[i].emoji);
+                
+                // Execute action (if not -1)
+                int action_id = s_custom_keywords[i].action_id;
+                xSemaphoreGive(s_kw_mutex);
+                
+                if (action_id >= 0) {
+                    // Spawn task for action execution (non-blocking)
+                    int *action_param = malloc(sizeof(int));
+                    if (action_param) {
+                        *action_param = action_id;
+                        xTaskCreate(custom_action_task, "custom_action", 3072, action_param, 5, NULL);
+                    }
+                }
+                
+                return 1;  // Keyword matched, stop checking
+            }
+        }
+        xSemaphoreGive(s_kw_mutex);
+    }
+    
+    // === PLAY DEAD keywords (built-in) ===
+    int is_shoot = 
+        str_contains_ci(lower, "súng nè") ||
+        str_contains_ci(lower, "sung ne") ||
+        str_contains_ci(lower, "súng né") ||
+        str_contains_ci(lower, "bắn") ||
+        str_contains_ci(lower, "ban ne") ||
+        str_contains_ci(lower, "bắn nè") ||
+        str_contains_ci(lower, "bang bang") ||
+        str_contains_ci(lower, "bùm") ||
+        str_contains_ci(lower, "bum") ||
+        str_contains_ci(lower, "shoot") ||
+        str_contains_ci(lower, "gun") ||
+        str_contains_ci(lower, "pew pew") ||
+        str_contains_ci(lower, "đoàng") ||
+        str_contains_ci(lower, "doanh") ||
+        str_contains_ci(lower, "giả chết") ||
+        str_contains_ci(lower, "gia chet") ||
+        str_contains_ci(lower, "play dead");
+    
+    if (is_shoot) {
+        ESP_LOGI(TAG, "[KEYWORD] MATCH: Play Dead triggered by '%s'", text);
+        trigger_play_dead();
+        return 1;
+    }
+    
+    // === QR CODE keywords (show control page / settings page) ===
+    int is_qr_control = 
+        str_contains_ci(lower, "trang dieu khien") ||
+        str_contains_ci(lower, "trang điều khiển") ||
+        str_contains_ci(lower, "điều khiển") ||
+        str_contains_ci(lower, "dieu khien") ||
+        str_contains_ci(lower, "control page") ||
+        str_contains_ci(lower, "show qr") ||
+        str_contains_ci(lower, "ma qr") ||
+        str_contains_ci(lower, "mã qr");
+    
+    if (is_qr_control) {
+        ESP_LOGI(TAG, "[KEYWORD] MATCH: QR Control Page triggered by '%s'", text);
+        show_qr_for_page("control");
+        return 1;
+    }
+    
+    int is_qr_settings = 
+        str_contains_ci(lower, "trang cai dat") ||
+        str_contains_ci(lower, "trang cài đặt") ||
+        str_contains_ci(lower, "cai dat") ||
+        str_contains_ci(lower, "cài đặt") ||
+        str_contains_ci(lower, "settings") ||
+        str_contains_ci(lower, "setting page");
+    
+    if (is_qr_settings) {
+        ESP_LOGI(TAG, "[KEYWORD] MATCH: QR Settings Page triggered by '%s'", text);
+        show_qr_for_page("settings");
+        return 1;
+    }
+    
+    return 0;  // No keyword matched
 }
 
 static esp_err_t playdead_handler(httpd_req_t *req) {
@@ -2593,6 +3341,65 @@ static esp_err_t music_server_handler(httpd_req_t *req) {
     
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+// ====== Radio Player handlers ======
+static esp_err_t radio_stations_handler(httpd_req_t *req) {
+    const char* json = Radio_GetStationListJson();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json ? json : "[]");
+    return ESP_OK;
+}
+
+static esp_err_t radio_play_handler(httpd_req_t *req) {
+    char station_name[128] = {0};
+    char url[256] = {0};
+    
+    // Check if playing by station name or custom URL
+    if (get_query_param(req, "station", station_name, sizeof(station_name)) == ESP_OK && strlen(station_name) > 0) {
+        url_decode_in_place(station_name);
+        ESP_LOGI(TAG, "Radio play station: %s", station_name);
+        bool success = Radio_PlayStation(station_name);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, success ? "{\"status\":\"ok\"}" : "{\"status\":\"error\",\"message\":\"Station not found\"}");
+        return ESP_OK;
+    } else if (get_query_param(req, "url", url, sizeof(url)) == ESP_OK && strlen(url) > 0) {
+        url_decode_in_place(url);
+        char name[128] = "Custom Radio";
+        get_query_param(req, "name", name, sizeof(name));
+        url_decode_in_place(name);
+        ESP_LOGI(TAG, "Radio play URL: %s (name: %s)", url, name);
+        bool success = Radio_PlayUrl(url, name);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, success ? "{\"status\":\"ok\"}" : "{\"status\":\"error\",\"message\":\"Failed to play URL\"}");
+        return ESP_OK;
+    }
+    
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing station or url parameter");
+    return ESP_FAIL;
+}
+
+static esp_err_t radio_stop_handler(httpd_req_t *req) {
+    Radio_Stop();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+static esp_err_t radio_status_handler(httpd_req_t *req) {
+    bool is_playing = Radio_IsPlaying();
+    const char* current = Radio_GetCurrentStation();
+    
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "playing", is_playing);
+    cJSON_AddStringToObject(root, "station", current ? current : "");
+    
+    char *json_str = cJSON_PrintUnformatted(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json_str ? json_str : "{}");
+    cJSON_free(json_str);
+    cJSON_Delete(root);
     return ESP_OK;
 }
 
@@ -3490,6 +4297,140 @@ static esp_err_t alarm_delete_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// ==================== CUSTOM KEYWORD HANDLERS ====================
+
+// Handler: GET /custom_keywords - List all custom keywords
+static esp_err_t custom_keywords_list_handler(httpd_req_t *req) {
+    cJSON *root = cJSON_CreateObject();
+    cJSON *arr = cJSON_CreateArray();
+    
+    if (xSemaphoreTake(s_kw_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        for (int i = 0; i < MAX_CUSTOM_KEYWORDS; i++) {
+            if (!s_custom_keywords[i].enabled) continue;
+            
+            cJSON *item = cJSON_CreateObject();
+            cJSON_AddNumberToObject(item, "slot", i);
+            cJSON_AddStringToObject(item, "keyword", s_custom_keywords[i].keyword);
+            cJSON_AddStringToObject(item, "emoji", s_custom_keywords[i].emoji);
+            cJSON_AddNumberToObject(item, "action", s_custom_keywords[i].action_id);
+            cJSON_AddItemToArray(arr, item);
+        }
+        xSemaphoreGive(s_kw_mutex);
+    }
+    
+    cJSON_AddItemToObject(root, "keywords", arr);
+    
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json ? json : "{\"keywords\":[]}");
+    if (json) free(json);
+    return ESP_OK;
+}
+
+// Handler: POST /custom_keyword/add - Add new custom keyword
+// Body: {"keyword":"text","emoji":"happy","action":1}
+static esp_err_t custom_keyword_add_handler(httpd_req_t *req) {
+    char buf[512];
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"No body\"}");
+        return ESP_OK;
+    }
+    buf[ret] = '\0';
+    
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Invalid JSON\"}");
+        return ESP_OK;
+    }
+    
+    cJSON *kw = cJSON_GetObjectItem(root, "keyword");
+    cJSON *em = cJSON_GetObjectItem(root, "emoji");
+    cJSON *act = cJSON_GetObjectItem(root, "action");
+    
+    if (!kw || !kw->valuestring || !em || !em->valuestring || !act) {
+        cJSON_Delete(root);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Missing fields\"}");
+        return ESP_OK;
+    }
+    
+    // Find empty slot
+    int slot = -1;
+    if (xSemaphoreTake(s_kw_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        for (int i = 0; i < MAX_CUSTOM_KEYWORDS; i++) {
+            if (!s_custom_keywords[i].enabled) {
+                slot = i;
+                break;
+            }
+        }
+        xSemaphoreGive(s_kw_mutex);
+    }
+    
+    if (slot < 0) {
+        cJSON_Delete(root);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Đã đầy (max 10 từ khóa)\"}");
+        return ESP_OK;
+    }
+    
+    // Save values before freeing cJSON
+    char saved_kw[MAX_KEYWORD_LEN] = {0};
+    char saved_em[MAX_EMOJI_LEN] = {0};
+    int saved_act = act->valueint;
+    strncpy(saved_kw, kw->valuestring, MAX_KEYWORD_LEN - 1);
+    strncpy(saved_em, em->valuestring, MAX_EMOJI_LEN - 1);
+    
+    // Save to NVS
+    esp_err_t err = save_custom_keyword(slot, saved_kw, saved_em, saved_act);
+    cJSON_Delete(root);
+    
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "[CUSTOM_KW] Added slot %d: '%s' -> %s, action %d", 
+                 slot, saved_kw, saved_em, saved_act);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":true}");
+    } else {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"NVS save failed\"}");
+    }
+    
+    return ESP_OK;
+}
+
+// Handler: DELETE /custom_keyword/delete?slot=N - Delete custom keyword
+static esp_err_t custom_keyword_delete_handler(httpd_req_t *req) {
+    char val[8] = {0};
+    int slot = -1;
+    
+    if (get_query_param(req, "slot", val, sizeof(val)) == ESP_OK) {
+        slot = atoi(val);
+    }
+    
+    if (slot < 0 || slot >= MAX_CUSTOM_KEYWORDS) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"Invalid slot\"}");
+        return ESP_OK;
+    }
+    
+    esp_err_t err = delete_custom_keyword(slot);
+    
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "[CUSTOM_KW] Deleted slot %d", slot);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":true}");
+    } else {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"NVS delete failed\"}");
+    }
+    
+    return ESP_OK;
+}
+
 // Handler for mode switch (walk/roll) - non-blocking with background task
 static esp_err_t mode_handler(httpd_req_t *req) {
     char mode_str[8];
@@ -3785,6 +4726,35 @@ static const httpd_uri_t uri_music_server = {
     .user_ctx = NULL
 };
 
+// Radio player URI handlers
+static const httpd_uri_t uri_radio_stations = {
+    .uri = "/radio_stations",
+    .method = HTTP_GET,
+    .handler = radio_stations_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_radio_play = {
+    .uri = "/radio_play",
+    .method = HTTP_GET,
+    .handler = radio_play_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_radio_stop = {
+    .uri = "/radio_stop",
+    .method = HTTP_GET,
+    .handler = radio_stop_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_radio_status = {
+    .uri = "/radio_status",
+    .method = HTTP_GET,
+    .handler = radio_status_handler,
+    .user_ctx = NULL
+};
+
 // SD Card player URI handlers
 static const httpd_uri_t uri_sd_list = {
     .uri = "/sd_list",
@@ -3905,11 +4875,33 @@ static const httpd_uri_t uri_alarm_delete = {
     .user_ctx = NULL
 };
 
+// Custom keyword URIs
+static const httpd_uri_t uri_custom_keywords_list = {
+    .uri = "/custom_keywords",
+    .method = HTTP_GET,
+    .handler = custom_keywords_list_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_custom_keyword_add = {
+    .uri = "/custom_keyword_add",
+    .method = HTTP_POST,
+    .handler = custom_keyword_add_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_custom_keyword_delete = {
+    .uri = "/custom_keyword_delete",
+    .method = HTTP_GET,
+    .handler = custom_keyword_delete_handler,
+    .user_ctx = NULL
+};
+
 httpd_handle_t webserver_start(void) {
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 50;  // Increased for all endpoints + upload/delete
+    config.max_uri_handlers = 60;  // Increased for all endpoints + upload/delete + custom keywords
     config.max_resp_headers = 8;
     config.recv_wait_timeout = 120;  // 120s timeout for large file uploads (slow connections)
     config.send_wait_timeout = 60;  // 60s send timeout for large responses
@@ -3921,6 +4913,12 @@ httpd_handle_t webserver_start(void) {
     for (int i = 0; i < 3; i++) {
         load_actions_from_nvs(i);
     }
+    
+    // Initialize custom keywords
+    if (s_kw_mutex == NULL) {
+        s_kw_mutex = xSemaphoreCreateMutex();
+    }
+    load_custom_keywords();
     
     ESP_LOGI(TAG, "Starting web server on port %d", config.server_port);
     
@@ -3957,6 +4955,11 @@ httpd_handle_t webserver_start(void) {
         httpd_register_uri_handler(server, &uri_music_stop);
         httpd_register_uri_handler(server, &uri_music_status);
         httpd_register_uri_handler(server, &uri_music_server);
+        // Radio handlers
+        httpd_register_uri_handler(server, &uri_radio_stations);
+        httpd_register_uri_handler(server, &uri_radio_play);
+        httpd_register_uri_handler(server, &uri_radio_stop);
+        httpd_register_uri_handler(server, &uri_radio_status);
         // SD Card handlers
         httpd_register_uri_handler(server, &uri_sd_list);
         httpd_register_uri_handler(server, &uri_sd_play);
@@ -3977,6 +4980,10 @@ httpd_handle_t webserver_start(void) {
         httpd_register_uri_handler(server, &uri_alarm_list);
         httpd_register_uri_handler(server, &uri_alarm_toggle);
         httpd_register_uri_handler(server, &uri_alarm_delete);
+        // Custom Keyword handlers
+        httpd_register_uri_handler(server, &uri_custom_keywords_list);
+        httpd_register_uri_handler(server, &uri_custom_keyword_add);
+        httpd_register_uri_handler(server, &uri_custom_keyword_delete);
         
         // Start alarm check task
         alarm_start_task();

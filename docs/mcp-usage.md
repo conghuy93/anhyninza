@@ -109,6 +109,26 @@ void InitializeTools() {
 }
 ```
 
+### 5. 显示二维码
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "self.qr_code",
+    "arguments": {
+      "page": "control"
+    }
+  },
+  "id": 5
+}
+```
+**说明**：在屏幕上显示二维码，用于访问设备的 Web 控制页面或设置页面。
+- `page` 参数：`"control"` = 控制页面，`"settings"` = 设置页面
+- 二维码包含设备的 WiFi IP 地址和对应页面路径
+- 自动在 30 秒后隐藏
+- 详细文档见 [`qr-code-feature.md`](./qr-code-feature.md)
+
 ## 备注
 - 工具名称、参数及返回值请以设备端 `AddTool` 注册为准。
 - 推荐所有新项目统一采用 MCP 协议进行物联网控制。

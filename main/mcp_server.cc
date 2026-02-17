@@ -17,6 +17,7 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "lvgl_display.h"
+#include "esp32_radio.h"
 
 #define TAG "MCP"
 
@@ -120,6 +121,66 @@ void McpServer::AddCommonTools() {
             });
     }
 #endif
+
+    // Radio tools
+    auto radio = Application::GetInstance().GetRadio();
+    if (radio) {
+        AddTool("self.radio.play_station",
+                "Play a radio station by name. Use this tool when user requests to play radio or listen to a specific station.\n"
+                "VOV mộc/mốc/mốt/mậu/máu/một/mút/mót/mục means VOV1 channel.\n"
+                "Args:\n"
+                "  `station_name`: The name of the radio station to play (e.g., 'VOV1', 'VOV GT Hà Nội', 'VOV Mê Kông').\n"
+                "Return:\n"
+                "  Playback status information. Starts playing the radio station immediately.",
+                PropertyList({
+                    Property("station_name", kPropertyTypeString) // Station name (required)
+                }),
+                [radio](const PropertyList &properties) -> ReturnValue {
+                    auto station_name = properties["station_name"].value<std::string>();
+
+                    if (!radio->PlayStation(station_name))
+                    {
+                        return "{\"success\": false, \"message\": \"Failed to find or play radio station: " + station_name + "\"}";
+                    }
+                    return "{\"success\": true, \"message\": \"Radio station " + station_name + " started playing\"}";
+                });
+
+        AddTool("self.radio.play_url",
+                "Play a radio stream from a custom URL. Use this tool when user provides a specific radio stream URL.\n"
+                "Args:\n"
+                "  `url`: The URL of the radio stream to play (required).\n"
+                "  `name`: Custom name for the radio station (optional).\n"
+                "Return:\n"
+                "  Playback status information. Starts playing the radio stream immediately.",
+                PropertyList({
+                    Property("url", kPropertyTypeString),     // Stream URL (required)
+                    Property("name", kPropertyTypeString, "") // Station name (optional)
+                }),
+                [radio](const PropertyList &properties) -> ReturnValue
+                {
+                    auto url = properties["url"].value<std::string>();
+                    auto name = properties["name"].value<std::string>();
+
+                    if (!radio->PlayUrl(url, name))
+                    {
+                        return "{\"success\": false, \"message\": \"Failed to play radio stream from URL: " + url + "\"}";
+                    }
+                    return "{\"success\": true, \"message\": \"Radio stream started playing\"}";
+                });
+
+        AddTool("self.radio.stop",
+                "Stop the currently playing radio. Use this tool when user requests to stop or turn off radio.\n"
+                "Return:\n"
+                "  Status information about stopping the radio.",
+                PropertyList(),
+                [radio](const PropertyList &properties) -> ReturnValue {
+                    if (!radio->Stop())
+                    {
+                        return "{\"success\": false, \"message\": \"Failed to stop radio\"}";
+                    }
+                    return "{\"success\": true, \"message\": \"Radio stopped\"}";
+                });
+    }
 
     // Restore the original tools list to the end of the tools list
     tools_.insert(tools_.end(), original_tools.begin(), original_tools.end());

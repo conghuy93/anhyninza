@@ -9,6 +9,7 @@
 #include "mcp_server.h"
 #include "assets.h"
 #include "settings.h"
+#include "esp32_radio.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -25,6 +26,22 @@ extern "C" __attribute__((weak)) void add_chat_message(const char* role, const c
     // Default implementation does nothing - boards with webserver will override
     (void)role;
     (void)content;
+}
+
+// Forward declare for local keyword detection (implemented in board webserver)
+// Weak attribute allows boards without this function to compile
+extern "C" __attribute__((weak)) int check_stt_keywords(const char* text) {
+    (void)text;
+    return 0;  // No keyword matched (default: no detection)
+}
+
+// Forward declare for emoji lock (implemented in board webserver)
+extern "C" __attribute__((weak)) int get_emoji_lock(void) {
+    return 0;  // Default: not locked
+}
+
+extern "C" __attribute__((weak)) void set_emoji_lock(int locked) {
+    (void)locked;
 }
 
 
@@ -55,6 +72,10 @@ Application::Application() {
 }
 
 Application::~Application() {
+    if (radio_ != nullptr) {
+        delete radio_;
+        radio_ = nullptr;
+    }
     if (clock_timer_handle_ != nullptr) {
         esp_timer_stop(clock_timer_handle_);
         esp_timer_delete(clock_timer_handle_);
@@ -162,6 +183,11 @@ void Application::Initialize() {
                 break;
         }
     });
+
+    // Initialize radio player
+    radio_ = new Esp32Radio();
+    radio_->Initialize();
+    ESP_LOGI(TAG, "Radio player initialized");
 
     // Start network asynchronously
     board.StartNetwork();
@@ -557,7 +583,12 @@ void Application::InitializeProtocol() {
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                Schedule([this]() {
+                Schedule([this, display]() {
+                    // Unlock emoji when TTS finishes (if locked during play_dead etc.)
+                    if (get_emoji_lock()) {
+                        set_emoji_lock(0);
+                        display->SetEmotion("neutral");
+                    }
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
@@ -585,13 +616,18 @@ void Application::InitializeProtocol() {
                     display->SetChatMessage("user", message.c_str());
                     // Save user message to chat history for web UI
                     add_chat_message("user", message.c_str());
+                    // Local keyword detection — triggers actions instantly without LLM
+                    check_stt_keywords(message.c_str());
                 });
             }
         } else if (strcmp(type->valuestring, "llm") == 0) {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
                 Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
-                    display->SetEmotion(emotion_str.c_str());
+                    // Block LLM emotion changes when emoji is locked (e.g. during play_dead)
+                    if (!get_emoji_lock()) {
+                        display->SetEmotion(emotion_str.c_str());
+                    }
                 });
             }
         } else if (strcmp(type->valuestring, "mcp") == 0) {

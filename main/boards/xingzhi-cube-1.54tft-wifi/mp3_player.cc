@@ -5,6 +5,13 @@
 #define MINIMP3_IMPLEMENTATION
 #define MINIMP3_ONLY_MP3
 #define MINIMP3_NO_SIMD
+// Rename minimp3 functions to avoid conflicts with esp_audio_codec MP3 decoder
+#define mp3dec_init local_mp3dec_init
+#define mp3dec_decode_frame local_mp3dec_decode_frame
+#define mp3dec_ex_open local_mp3dec_ex_open
+#define mp3dec_ex_close local_mp3dec_ex_close
+#define mp3dec_ex_read local_mp3dec_ex_read
+#define mp3dec_ex_seek local_mp3dec_ex_seek
 #include "minimp3.h"
 
 #include "mp3_player.h"

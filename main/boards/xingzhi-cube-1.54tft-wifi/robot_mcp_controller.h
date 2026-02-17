@@ -677,9 +677,8 @@ static void register_robot_mcp_tools() {
                 state->j_x = 0;
                 vTaskDelay(pdMS_TO_TICKS(300));
                 
-                // Step 3: Tilt left (LL=100, RL=175), spin LF 360° in one direction (2000ms), wait 1500ms
+                // Step 3: Tilt left, rotate LF to 60 deg over 2s, then go home
                 set_manual_mode(true);
-                calibration_t *cal = get_calibration();
                 servo_attach(SERVO_CH_LEFT_LEG);
                 servo_attach(SERVO_CH_RIGHT_LEG);
                 servo_attach(SERVO_CH_LEFT_FOOT);
@@ -687,26 +686,25 @@ static void register_robot_mcp_tools() {
                 servo_write(SERVO_CH_RIGHT_LEG, 175);
                 vTaskDelay(pdMS_TO_TICKS(300));
                 
-                // Spin LF 360° in one direction (2000ms) - sweep from start to end, DO NOT return
-                int lf_center = cal->lf_neutral;
-                int rotation_steps = 20; // 20 steps for smooth rotation
-                int step_delay = 2000 / rotation_steps; // 100ms per step
-                for (int i = 0; i <= rotation_steps; i++) {
-                    // Sweep from center-90 to center+90 (180° range) in ONE direction
-                    int angle = lf_center - 90 + (i * 180 / rotation_steps);
+                // Smoothly rotate LF to 60 deg over 2s
+                calibration_t *cal = get_calibration();
+                int lf_start = cal->lf_neutral;
+                int lf_target = 60;
+                int rotation_steps = 20;
+                int step_delay = 2000 / rotation_steps;
+                for (int i = 1; i <= rotation_steps; i++) {
+                    int angle = lf_start + (lf_target - lf_start) * i / rotation_steps;
                     servo_write(SERVO_CH_LEFT_FOOT, angle);
                     vTaskDelay(pdMS_TO_TICKS(step_delay));
                 }
-                // DO NOT return to center - stay at final position (center+90)
-                // Wait 1500ms before next action
-                vTaskDelay(pdMS_TO_TICKS(1500));
+                set_manual_mode(false);
+                go_home();
+                vTaskDelay(pdMS_TO_TICKS(500));
                 
                 // Step 4: Lie down (tilt left with LL=155)
                 set_manual_mode(true);
                 servo_attach(SERVO_CH_LEFT_LEG);
                 servo_attach(SERVO_CH_RIGHT_LEG);
-                servo_write(SERVO_CH_LEFT_FOOT, lf_center); // Reset foot position first
-                vTaskDelay(pdMS_TO_TICKS(100));
                 servo_write(SERVO_CH_LEFT_LEG, 155);
                 servo_write(SERVO_CH_RIGHT_LEG, 175);
                 vTaskDelay(pdMS_TO_TICKS(2000));
@@ -720,11 +718,28 @@ static void register_robot_mcp_tools() {
             }, "mcp_playdead", 3072, NULL, 5, NULL);
             
             ESP_LOGI(TAG_MCP, "Play Dead triggered");
-            return std::string("Robot đang giả chết! 😱 Shock → Lùi 2 bước → Ngã trái + Xoay chân 360° (2s) → Nằm xuống → Home 😶");
+            return std::string("Robot dang gia chet! Shock -> Lui 2 buoc -> Nghieng trai + LF 60 (2s) -> Home -> Nam xuong -> Home");
         }
     );
     
-    ESP_LOGI(TAG_MCP, "Robot MCP tools registered (18 tools: 12 robot + 3 alarm/slot/playdead + 3 music)");
+    // QR Code display - show control/settings page QR
+    mcp_server.AddTool(
+        "self.qr_code",
+        "Hien thi ma QR len man hinh de nguoi dung quet truy cap trang web. "
+        "page='control': trang dieu khien robot. "
+        "page='settings': trang cai dat/calibration. "
+        "Dung khi nguoi dung noi 'hien thi QR', 'vao trang dieu khien', 'show QR code', 'trang cai dat'.",
+        PropertyList({Property("page", kPropertyTypeString)}),
+        [](const PropertyList& properties) -> ReturnValue {
+            std::string page = properties["page"].value<std::string>();
+            show_qr_for_page(page.c_str());
+            
+            ESP_LOGI(TAG_MCP, "QR code shown for page: %s", page.c_str());
+            return std::string("Da hien thi ma QR trang ") + page + " tren man hinh (30 giay). Nguoi dung co the quet bang dien thoai.";
+        }
+    );
+    
+    ESP_LOGI(TAG_MCP, "Robot MCP tools registered (19 tools: 12 robot + 3 alarm/slot/playdead + 3 music + 1 qr)");
 }
 
 #endif // ROBOT_MCP_CONTROLLER_H

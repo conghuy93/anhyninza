@@ -18,6 +18,8 @@
 #include <esp_heap_caps.h>
 #include <nvs_flash.h>
 #include <atomic>
+#include <vector>
+#include <string>
 
 #include "mcp_server.h"
 #include <driver/rtc_io.h>
@@ -28,6 +30,7 @@
 #include "mp3_player.h"
 #include "mp3_player_c.h"
 #include "stream_player.h"
+#include "radio_player_c.h"
 
 // Robot control
 #include "robot_control.h"
@@ -105,6 +108,8 @@ private:
     esp_lcd_panel_handle_t panel_ = nullptr;
     Mp3Player* mp3_player_ = nullptr;
     bool music_mode_ = false;
+    bool radio_mode_ = false;
+    int radio_station_index_ = 0;
     bool sd_card_mounted_ = false;
     httpd_handle_t robot_webserver_ = nullptr;
     bool robot_initialized_ = false;
@@ -146,6 +151,16 @@ private:
     lv_obj_t* playlist_title_label_ = nullptr;
     lv_obj_t* playlist_items_[7] = {nullptr};  // Max visible items + buffer
     esp_timer_handle_t playlist_timeout_timer_ = nullptr;
+
+    // Radio station selection mode
+    bool radio_station_selection_mode_ = false;
+    int radio_station_selected_index_ = 0;
+    static constexpr int RADIO_VISIBLE_ITEMS = 5;
+    lv_obj_t* radio_station_panel_ = nullptr;
+    lv_obj_t* radio_station_title_label_ = nullptr;
+    lv_obj_t* radio_station_items_[7] = {nullptr};
+    esp_timer_handle_t radio_station_timeout_timer_ = nullptr;
+    std::vector<std::string> radio_stations_cache_;
 
     // Get text font from theme (supports Vietnamese/Chinese), fallback to montserrat
     const lv_font_t* GetTextFont() {
@@ -786,6 +801,61 @@ private:
             lvgl_port_unlock();
         }
         
+        // Check radio player (show UI when radio_mode_ is active OR Radio_IsPlaying)
+        if (radio_mode_ || Radio_IsPlaying()) {
+            any_playing = true;
+            lvgl_port_lock(0);
+            
+            const char* station = Radio_GetCurrentStation();
+            if (station && strlen(station) > 0) {
+                lv_label_set_text(music_title_label_, station);
+            } else {
+                lv_label_set_text(music_title_label_, "FM Radio");
+            }
+            
+            if (Radio_IsPlaying()) {
+                lv_label_set_text(music_artist_label_, "VOV Radio");
+                lv_label_set_text(music_state_label_, LV_SYMBOL_AUDIO " Dang phat");
+                lv_label_set_text(music_track_label_, "Dang phat dai FM...");
+            } else {
+                lv_label_set_text(music_artist_label_, "Dang ket noi...");
+                lv_label_set_text(music_state_label_, LV_SYMBOL_REFRESH " Dang tai...");
+                lv_label_set_text(music_track_label_, "Vui long cho...");
+            }
+            lv_obj_set_style_text_color(music_state_label_, lv_color_hex(0xFF8C00), 0);
+            
+            // Change icon to radio style - warm orange theme
+            lv_label_set_text(music_icon_label_, LV_SYMBOL_AUDIO);
+            lv_obj_set_style_text_color(music_icon_label_, lv_color_hex(0xFFA500), 0);
+            lv_obj_set_style_border_color(music_icon_bg_, lv_color_hex(0xFF6B00), 0);
+            lv_obj_set_style_shadow_color(music_icon_bg_, lv_color_hex(0xFF6B00), 0);
+            
+            // Progress bar cycles for radio - orange theme
+            static int radio_progress = 0;
+            radio_progress = (radio_progress + 1) % 100;
+            lv_bar_set_value(music_progress_bar_, radio_progress, LV_ANIM_ON);
+            lv_obj_set_style_bg_color(music_progress_bar_, lv_color_hex(0xFF6B00), LV_PART_INDICATOR);
+            lv_obj_set_style_bg_grad_color(music_progress_bar_, lv_color_hex(0xFFA500), LV_PART_INDICATOR);
+            lv_obj_set_style_shadow_color(music_progress_bar_, lv_color_hex(0xFF6B00), LV_PART_INDICATOR);
+            
+            UpdateSpectrumBars(Radio_IsPlaying());
+            
+            lvgl_port_unlock();
+        } else if (!radio_mode_ && !Radio_IsPlaying()) {
+            // Restore music style when not in radio mode
+            if (music_panel_ && (mp3_player_ && mp3_player_->GetState() != Mp3PlayerState::STOPPED)) {
+                lvgl_port_lock(0);
+                lv_label_set_text(music_icon_label_, LV_SYMBOL_AUDIO);
+                lv_obj_set_style_text_color(music_icon_label_, lv_color_hex(0xff69b4), 0);
+                lv_obj_set_style_border_color(music_icon_bg_, lv_color_hex(0xff1493), 0);
+                lv_obj_set_style_shadow_color(music_icon_bg_, lv_color_hex(0xff1493), 0);
+                lv_obj_set_style_bg_color(music_progress_bar_, lv_color_hex(0xff1493), LV_PART_INDICATOR);
+                lv_obj_set_style_bg_grad_color(music_progress_bar_, lv_color_hex(0xff69b4), LV_PART_INDICATOR);
+                lv_obj_set_style_shadow_color(music_progress_bar_, lv_color_hex(0xff1493), LV_PART_INDICATOR);
+                lvgl_port_unlock();
+            }
+        }
+        
         ShowMusicDisplay(any_playing);
         
         // ====== Auto LED music mode & Power save ======
@@ -924,12 +994,24 @@ private:
                 return;
             }
             
+            // If in radio station selection mode - select and play
+            if (radio_station_selection_mode_) {
+                RadioStationSelectCurrent();
+                return;
+            }
+            
             // Check if streaming music - single click stops it
             int stream_state = StreamPlayer_GetState();
             if (stream_state == 2 || stream_state == 3) {  // BUFFERING=2 or PLAYING=3
                 ESP_LOGI(TAG, "Boot button: stopping streaming music");
                 StreamPlayer_Stop();
                 GetDisplay()->ShowNotification("Da tat nhac");
+                return;
+            }
+            
+            // In radio mode - single click stops radio
+            if (radio_mode_) {
+                StopRadioMode();
                 return;
             }
             
@@ -958,6 +1040,15 @@ private:
 
         boot_button_.OnLongPress([this]() {
             power_save_timer_->WakeUp();
+            // Long press BOOT in radio mode = show radio station selection
+            if (radio_mode_) {
+                if (radio_station_selection_mode_) {
+                    HideRadioStationSelection();
+                } else {
+                    ShowRadioStationSelection();
+                }
+                return;
+            }
             // Long press BOOT in music mode = show playlist selection
             if (music_mode_ && mp3_player_ && mp3_player_->GetPlaylistSize() > 0) {
                 if (playlist_selection_mode_) {
@@ -982,13 +1073,13 @@ private:
                 return;
             }
             
-            // In music mode - next track
-            if (music_mode_ && mp3_player_) {
-                mp3_player_->Next();
+            // In radio station selection mode - scroll up
+            if (radio_station_selection_mode_) {
+                RadioStationMoveUp();
                 return;
             }
             
-            // Normal mode: adjust volume
+            // All modes (idle, music, radio): adjust volume
             auto codec = GetAudioCodec();
             auto volume = codec->output_volume() + 10;
             if (volume > 100) {
@@ -996,6 +1087,19 @@ private:
             }
             codec->SetOutputVolume(volume);
             ShowVolumePopup(volume);
+        });
+
+        volume_up_button_.OnDoubleClick([this]() {
+            power_save_timer_->WakeUp();
+            // In music mode - double click to next track
+            if (music_mode_ && mp3_player_) {
+                mp3_player_->Next();
+                return;
+            }
+            // In radio mode - double click to next station
+            if (radio_mode_) {
+                RadioNextStation();
+            }
         });
 
         volume_up_button_.OnLongPress([this]() {
@@ -1026,13 +1130,13 @@ private:
                 return;
             }
             
-            // In music mode - previous track
-            if (music_mode_ && mp3_player_) {
-                mp3_player_->Previous();
+            // In radio station selection mode - scroll down
+            if (radio_station_selection_mode_) {
+                RadioStationMoveDown();
                 return;
             }
             
-            // Normal mode: adjust volume
+            // All modes (idle, music, radio): adjust volume
             auto codec = GetAudioCodec();
             auto volume = codec->output_volume() - 10;
             if (volume < 0) {
@@ -1040,6 +1144,19 @@ private:
             }
             codec->SetOutputVolume(volume);
             ShowVolumePopup(volume);
+        });
+
+        volume_down_button_.OnDoubleClick([this]() {
+            power_save_timer_->WakeUp();
+            // In music mode - double click to previous track
+            if (music_mode_ && mp3_player_) {
+                mp3_player_->Previous();
+                return;
+            }
+            // In radio mode - double click to previous station
+            if (radio_mode_) {
+                RadioPrevStation();
+            }
         });
 
         volume_down_button_.OnLongPress([this]() {
@@ -1134,11 +1251,341 @@ private:
         GetDisplay()->ShowNotification("Music OFF");
     }
 
-    void ToggleMusicMode() {
+    void StartRadioMode() {
+        if (radio_mode_) return;
+        // Stop music if playing
         if (music_mode_) {
             StopMusicMode();
+        }
+        // Stop streaming if active
+        StreamPlayer_Stop();
+        
+        radio_mode_ = true;
+        
+        // Stop AI chat if active
+        auto& app = Application::GetInstance();
+        if (app.GetDeviceState() == kDeviceStateListening || 
+            app.GetDeviceState() == kDeviceStateSpeaking) {
+            app.ToggleChatState();
+            vTaskDelay(pdMS_TO_TICKS(300));
+        }
+        
+        // Play first station (or last selected)
+        const char* json = Radio_GetStationListJson();
+        ESP_LOGI(TAG, "Starting FM Radio mode, stations: %s", json);
+        
+        // Parse first station name from JSON array like ["VOV1 - VOV 1 - Thời sự", ...]
+        std::string first_station;
+        if (json && strlen(json) > 2) {
+            std::string json_str(json);
+            size_t start = json_str.find('"');
+            size_t end = json_str.find('"', start + 1);
+            if (start != std::string::npos && end != std::string::npos) {
+                first_station = json_str.substr(start + 1, end - start - 1);
+            }
+        }
+        
+        if (!first_station.empty()) {
+            Radio_PlayStation(first_station.c_str());
+            GetDisplay()->ShowNotification("FM: " + first_station);
         } else {
+            GetDisplay()->ShowNotification("FM Radio ON");
+            Radio_PlayStation("VOV1");
+        }
+    }
+
+    void StopRadioMode() {
+        if (!radio_mode_) return;
+        if (radio_station_selection_mode_) {
+            HideRadioStationSelection();
+        }
+        radio_mode_ = false;
+        radio_station_index_ = 0;
+        Radio_Stop();
+        GetDisplay()->ShowNotification("FM OFF");
+    }
+
+    void RadioNextStation() {
+        if (!radio_mode_) return;
+        const char* json = Radio_GetStationListJson();
+        if (!json || strlen(json) < 3) return;
+        
+        // Parse station list
+        std::vector<std::string> stations;
+        std::string json_str(json);
+        size_t pos = 0;
+        while ((pos = json_str.find('"', pos)) != std::string::npos) {
+            size_t end = json_str.find('"', pos + 1);
+            if (end == std::string::npos) break;
+            stations.push_back(json_str.substr(pos + 1, end - pos - 1));
+            pos = end + 1;
+        }
+        
+        if (stations.empty()) return;
+        radio_station_index_ = (radio_station_index_ + 1) % (int)stations.size();
+        Radio_PlayStation(stations[radio_station_index_].c_str());
+        GetDisplay()->ShowNotification("FM: " + stations[radio_station_index_]);
+    }
+
+    void RadioPrevStation() {
+        if (!radio_mode_) return;
+        const char* json = Radio_GetStationListJson();
+        if (!json || strlen(json) < 3) return;
+        
+        std::vector<std::string> stations;
+        std::string json_str(json);
+        size_t pos = 0;
+        while ((pos = json_str.find('"', pos)) != std::string::npos) {
+            size_t end = json_str.find('"', pos + 1);
+            if (end == std::string::npos) break;
+            stations.push_back(json_str.substr(pos + 1, end - pos - 1));
+            pos = end + 1;
+        }
+        
+        if (stations.empty()) return;
+        radio_station_index_--;
+        if (radio_station_index_ < 0) radio_station_index_ = (int)stations.size() - 1;
+        Radio_PlayStation(stations[radio_station_index_].c_str());
+        GetDisplay()->ShowNotification("FM: " + stations[radio_station_index_]);
+    }
+
+    // ===== Radio Station Selection UI =====
+    void ParseRadioStations() {
+        radio_stations_cache_.clear();
+        const char* json = Radio_GetStationListJson();
+        if (!json || strlen(json) < 3) return;
+        
+        std::string json_str(json);
+        size_t pos = 0;
+        while ((pos = json_str.find('"', pos)) != std::string::npos) {
+            size_t end = json_str.find('"', pos + 1);
+            if (end == std::string::npos) break;
+            radio_stations_cache_.push_back(json_str.substr(pos + 1, end - pos - 1));
+            pos = end + 1;
+        }
+    }
+
+    void CreateRadioStationSelection() {
+        if (radio_station_panel_) return;
+        
+        lvgl_port_lock(0);
+        auto screen = lv_screen_active();
+        
+        // Full-screen panel for radio station selection - dark orange theme
+        radio_station_panel_ = lv_obj_create(screen);
+        lv_obj_set_size(radio_station_panel_, 240, 240);
+        lv_obj_align(radio_station_panel_, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_set_style_bg_color(radio_station_panel_, lv_color_hex(0x1a1000), 0);
+        lv_obj_set_style_bg_grad_color(radio_station_panel_, lv_color_hex(0x2e1a00), 0);
+        lv_obj_set_style_bg_grad_dir(radio_station_panel_, LV_GRAD_DIR_VER, 0);
+        lv_obj_set_style_border_width(radio_station_panel_, 0, 0);
+        lv_obj_set_style_radius(radio_station_panel_, 0, 0);
+        lv_obj_set_style_pad_all(radio_station_panel_, 0, 0);
+        lv_obj_add_flag(radio_station_panel_, LV_OBJ_FLAG_HIDDEN);
+        
+        // Title label
+        radio_station_title_label_ = lv_label_create(radio_station_panel_);
+        lv_obj_set_style_text_font(radio_station_title_label_, GetTextFont(), 0);
+        lv_obj_set_style_text_color(radio_station_title_label_, lv_color_hex(0xFF8C00), 0);
+        lv_label_set_text(radio_station_title_label_, LV_SYMBOL_AUDIO " Chon kenh FM");
+        lv_obj_align(radio_station_title_label_, LV_ALIGN_TOP_MID, 0, 10);
+        
+        // Create station item labels
+        for (int i = 0; i < RADIO_VISIBLE_ITEMS; i++) {
+            radio_station_items_[i] = lv_label_create(radio_station_panel_);
+            lv_obj_set_style_text_font(radio_station_items_[i], GetTextFont(), 0);
+            lv_obj_set_style_text_color(radio_station_items_[i], lv_color_hex(0xecf0f1), 0);
+            lv_obj_set_width(radio_station_items_[i], 220);
+            lv_obj_set_style_pad_left(radio_station_items_[i], 10, 0);
+            lv_obj_set_style_pad_ver(radio_station_items_[i], 5, 0);
+            lv_label_set_long_mode(radio_station_items_[i], LV_LABEL_LONG_SCROLL_CIRCULAR);
+            lv_label_set_text(radio_station_items_[i], "");
+            lv_obj_align(radio_station_items_[i], LV_ALIGN_TOP_LEFT, 5, 40 + i * 38);
+        }
+        
+        // Auto-hide timer (10 seconds)
+        esp_timer_create_args_t timer_args = {};
+        timer_args.callback = [](void* arg) {
+            auto* self = static_cast<XINGZHI_CUBE_1_54TFT_WIFI*>(arg);
+            self->HideRadioStationSelection();
+        };
+        timer_args.arg = this;
+        timer_args.name = "radio_sel_timeout";
+        esp_timer_create(&timer_args, &radio_station_timeout_timer_);
+        
+        lvgl_port_unlock();
+    }
+
+    void ShowRadioStationSelection() {
+        if (!radio_station_panel_) {
+            CreateRadioStationSelection();
+        }
+        if (!radio_station_panel_) return;
+        
+        // Parse stations
+        ParseRadioStations();
+        if (radio_stations_cache_.empty()) {
+            GetDisplay()->ShowNotification("Khong co kenh FM");
+            return;
+        }
+        
+        radio_station_selection_mode_ = true;
+        radio_station_selected_index_ = radio_station_index_;
+        if (radio_station_selected_index_ < 0 || radio_station_selected_index_ >= (int)radio_stations_cache_.size()) {
+            radio_station_selected_index_ = 0;
+        }
+        
+        UpdateRadioStationSelection();
+        
+        lvgl_port_lock(0);
+        lv_obj_remove_flag(radio_station_panel_, LV_OBJ_FLAG_HIDDEN);
+        // Hide music panel while selecting
+        if (music_panel_) {
+            lv_obj_add_flag(music_panel_, LV_OBJ_FLAG_HIDDEN);
+        }
+        lvgl_port_unlock();
+        
+        // Reset timeout timer
+        esp_timer_stop(radio_station_timeout_timer_);
+        esp_timer_start_once(radio_station_timeout_timer_, 10000000);  // 10 seconds
+    }
+
+    void UpdateRadioStationSelection() {
+        if (!radio_station_panel_) return;
+        
+        int station_count = (int)radio_stations_cache_.size();
+        if (station_count == 0) return;
+        
+        // Calculate visible range (center selected item)
+        int start_index = radio_station_selected_index_ - RADIO_VISIBLE_ITEMS / 2;
+        if (start_index < 0) start_index = 0;
+        if (start_index + RADIO_VISIBLE_ITEMS > station_count) {
+            start_index = station_count - RADIO_VISIBLE_ITEMS;
+            if (start_index < 0) start_index = 0;
+        }
+        
+        lvgl_port_lock(0);
+        
+        // Update title with count
+        char title[64];
+        snprintf(title, sizeof(title), LV_SYMBOL_AUDIO " Kenh FM (%d/%d)", 
+                 radio_station_selected_index_ + 1, station_count);
+        lv_label_set_text(radio_station_title_label_, title);
+        
+        // Update visible items
+        for (int i = 0; i < RADIO_VISIBLE_ITEMS; i++) {
+            int item_index = start_index + i;
+            
+            if (item_index >= station_count) {
+                lv_label_set_text(radio_station_items_[i], "");
+                lv_obj_set_style_bg_opa(radio_station_items_[i], LV_OPA_0, 0);
+                continue;
+            }
+            
+            // Extract display name from "KEY - Display Name" format
+            std::string display_name = radio_stations_cache_[item_index];
+            size_t dash_pos = display_name.find(" - ");
+            if (dash_pos != std::string::npos && dash_pos + 3 < display_name.size()) {
+                display_name = display_name.substr(dash_pos + 3);
+            }
+            
+            // Format: index. name
+            char item_text[128];
+            snprintf(item_text, sizeof(item_text), "%d. %s", item_index + 1, display_name.c_str());
+            lv_label_set_text(radio_station_items_[i], item_text);
+            
+            // Highlight selected item with orange
+            if (item_index == radio_station_selected_index_) {
+                lv_obj_set_style_bg_color(radio_station_items_[i], lv_color_hex(0xFF6B00), 0);
+                lv_obj_set_style_bg_opa(radio_station_items_[i], LV_OPA_50, 0);
+                lv_obj_set_style_text_color(radio_station_items_[i], lv_color_hex(0xffffff), 0);
+                lv_obj_set_style_radius(radio_station_items_[i], 5, 0);
+            } else {
+                lv_obj_set_style_bg_opa(radio_station_items_[i], LV_OPA_0, 0);
+                lv_obj_set_style_text_color(radio_station_items_[i], lv_color_hex(0xbdc3c7), 0);
+            }
+        }
+        
+        lvgl_port_unlock();
+        
+        // Reset timeout
+        esp_timer_stop(radio_station_timeout_timer_);
+        esp_timer_start_once(radio_station_timeout_timer_, 10000000);
+    }
+
+    void HideRadioStationSelection() {
+        radio_station_selection_mode_ = false;
+        
+        if (radio_station_panel_) {
+            lvgl_port_lock(0);
+            lv_obj_add_flag(radio_station_panel_, LV_OBJ_FLAG_HIDDEN);
+            // Show music panel again if radio is playing
+            if (music_panel_ && radio_mode_) {
+                lv_obj_remove_flag(music_panel_, LV_OBJ_FLAG_HIDDEN);
+            }
+            lvgl_port_unlock();
+        }
+        
+        if (radio_station_timeout_timer_) {
+            esp_timer_stop(radio_station_timeout_timer_);
+        }
+    }
+
+    void RadioStationMoveUp() {
+        if (!radio_station_selection_mode_) return;
+        
+        radio_station_selected_index_--;
+        if (radio_station_selected_index_ < 0) {
+            radio_station_selected_index_ = (int)radio_stations_cache_.size() - 1;
+        }
+        UpdateRadioStationSelection();
+    }
+
+    void RadioStationMoveDown() {
+        if (!radio_station_selection_mode_) return;
+        
+        radio_station_selected_index_++;
+        if (radio_station_selected_index_ >= (int)radio_stations_cache_.size()) {
+            radio_station_selected_index_ = 0;
+        }
+        UpdateRadioStationSelection();
+    }
+
+    void RadioStationSelectCurrent() {
+        if (!radio_station_selection_mode_) return;
+        
+        int idx = radio_station_selected_index_;
+        if (idx < 0 || idx >= (int)radio_stations_cache_.size()) return;
+        
+        std::string station = radio_stations_cache_[idx];
+        radio_station_index_ = idx;
+        
+        HideRadioStationSelection();
+        
+        // Play the selected station
+        Radio_PlayStation(station.c_str());
+        
+        // Extract display name for notification
+        std::string display_name = station;
+        size_t dash_pos = display_name.find(" - ");
+        if (dash_pos != std::string::npos && dash_pos + 3 < display_name.size()) {
+            display_name = display_name.substr(dash_pos + 3);
+        }
+        GetDisplay()->ShowNotification("FM: " + display_name);
+    }
+
+    void ToggleMusicMode() {
+        // Cycle: Idle → Music (SD) → FM Radio → Idle
+        if (!music_mode_ && !radio_mode_) {
+            // Idle → Music
             StartMusicMode();
+        } else if (music_mode_ && !radio_mode_) {
+            // Music → FM Radio
+            StopMusicMode();
+            StartRadioMode();
+        } else if (radio_mode_) {
+            // FM Radio → Idle
+            StopRadioMode();
         }
     }
 

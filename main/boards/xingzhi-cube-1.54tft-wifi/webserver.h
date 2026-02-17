@@ -42,6 +42,30 @@ int search_music_files_in_sdcard(const char* keyword, char* result_buffer, size_
 // Emoji/display bridge (implemented in board .cc, called from webserver.c)
 void set_robot_emoji(const char* emotion);
 
+// ==================== KEYWORD DETECTION (Local, no LLM) ====================
+// Trigger play dead animation (non-blocking, spawns FreeRTOS task)
+void trigger_play_dead(void);
+
+// Emoji lock mechanism - locks emoji during keyword-triggered actions
+// When locked, LLM emotion changes are blocked until TTS ends
+void set_emoji_lock(int locked);  // 1=lock, 0=unlock
+int  get_emoji_lock(void);        // returns current lock state
+
+// Check STT text for local keyword triggers (called from application.cc)
+// Returns 1 if a keyword was detected and action triggered, 0 otherwise
+int check_stt_keywords(const char* text);
+
+// ==================== QR CODE DISPLAY ====================
+// Show QR code with URL on the TFT display (auto-hides after duration_ms)
+void show_qr_code(const char* url, int duration_ms);
+
+// Hide QR code from display (manual dismiss)
+void hide_qr_code(void);
+
+// Show QR code for a specific page ("control" or "settings")
+// Automatically gets WiFi IP and builds the URL
+void show_qr_for_page(const char* page);
+
 #ifdef __cplusplus
 }
 #endif

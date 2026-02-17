@@ -1229,3 +1229,75 @@ int StreamPlayer_DownloadThumbnail(const char* url, uint8_t** data, size_t* size
 }
 
 } // extern "C"
+
+// ============================================================================
+// Radio Player C Interface
+// ============================================================================
+
+#include "../../application.h"
+#include "../../features/music/esp32_radio.h"
+
+extern "C" {
+
+bool Radio_PlayStation(const char* station_name) {
+    if (!station_name) return false;
+    auto& app = Application::GetInstance();
+    auto* radio = app.GetRadio();
+    if (!radio) return false;
+    return radio->PlayStation(station_name);
+}
+
+bool Radio_PlayUrl(const char* url, const char* name) {
+    if (!url) return false;
+    auto& app = Application::GetInstance();
+    auto* radio = app.GetRadio();
+    if (!radio) return false;
+    std::string station_name = name ? name : "Custom Stream";
+    return radio->PlayUrl(url, station_name);
+}
+
+bool Radio_Stop(void) {
+    auto& app = Application::GetInstance();
+    auto* radio = app.GetRadio();
+    if (!radio) return false;
+    return radio->Stop();
+}
+
+bool Radio_IsPlaying(void) {
+    auto& app = Application::GetInstance();
+    auto* radio = app.GetRadio();
+    if (!radio) return false;
+    return radio->IsPlaying();
+}
+
+static char s_current_station_buf[128] = {0};
+const char* Radio_GetCurrentStation(void) {
+    auto& app = Application::GetInstance();
+    auto* radio = app.GetRadio();
+    if (!radio) return "";
+    const auto& name = radio->GetCurrentStation();
+    strncpy(s_current_station_buf, name.c_str(), sizeof(s_current_station_buf) - 1);
+    return s_current_station_buf;
+}
+
+static char s_station_list_json_buf[4096] = {0};
+const char* Radio_GetStationListJson(void) {
+    auto& app = Application::GetInstance();
+    auto* radio = app.GetRadio();
+    if (!radio) return "[]";
+    
+    const auto& stations = radio->GetStationList();
+    std::string json = "[";
+    bool first = true;
+    for (const auto& station_name : stations) {
+        if (!first) json += ",";
+        json += "\"" + station_name + "\"";
+        first = false;
+    }
+    json += "]";
+    
+    strncpy(s_station_list_json_buf, json.c_str(), sizeof(s_station_list_json_buf) - 1);
+    return s_station_list_json_buf;
+}
+
+} // extern "C"
